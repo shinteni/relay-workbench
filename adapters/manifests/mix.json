@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "mix",
+  "name": "MIX",
+  "detail": "Claude × Codex consensus",
+  "adapter_executable": "../bin/mix-adapter",
+  "capabilities": ["session_resume", "mix_model_options"],
+  "version_label": "private consensus · 4 rounds",
+  "requirements": [
+    {
+      "name": "Codex CLI",
+      "environment": "RELAY_CODEX_PATH",
+      "candidates": [
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "~/.local/bin/codex",
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+      ],
+      "version_arguments": []
+    },
+    {
+      "name": "Claude CLI",
+      "environment": "RELAY_CLAUDE_PATH",
+      "candidates": [
+        "~/.local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+      ],
+      "version_arguments": []
+    }
+  ]
+}

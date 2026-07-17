@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "codex",
+  "name": "Codex",
+  "detail": "OpenAI Codex CLI",
+  "adapter_executable": "../bin/codex-adapter",
+  "capabilities": ["session_resume", "codex_modes", "interactive_input"],
+  "requirements": [
+    {
+      "name": "Codex CLI",
+      "environment": "RELAY_CODEX_PATH",
+      "candidates": [
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "~/.local/bin/codex",
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex"
+      ],
+      "version_arguments": ["--version"]
+    }
+  ]
+}

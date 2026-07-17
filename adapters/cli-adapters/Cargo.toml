@@ -1,0 +1,21 @@
+[package]
+name = "cli-adapters"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+relay-protocol = { path = "../../crates/relay-protocol" }
+serde_json = "1"
+
+[[bin]]
+name = "codex-adapter"
+path = "src/bin/codex-adapter.rs"
+
+[[bin]]
+name = "claude-adapter"
+path = "src/bin/claude-adapter.rs"
+
+[[bin]]
+name = "mix-adapter"
+path = "src/bin/mix-adapter.rs"

@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "adapters/cli-adapters",
+    "adapters/mock-adapter",
+    "crates/relay-protocol",
+    "crates/relayd",
+]
+resolver = "2"

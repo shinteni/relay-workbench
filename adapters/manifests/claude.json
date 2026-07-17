@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "claude",
+  "name": "Claude",
+  "detail": "Anthropic Claude CLI",
+  "adapter_executable": "../bin/claude-adapter",
+  "capabilities": ["session_resume"],
+  "requirements": [
+    {
+      "name": "Claude CLI",
+      "environment": "RELAY_CLAUDE_PATH",
+      "candidates": [
+        "~/.local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude"
+      ],
+      "version_arguments": ["--version"]
+    }
+  ]
+}
