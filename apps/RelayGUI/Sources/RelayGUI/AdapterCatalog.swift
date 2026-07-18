@@ -23,16 +23,25 @@ enum RelayAgentHealth: Hashable {
     }
 }
 
+struct RelayAgentOption: Hashable {
+    let key: String
+    let label: String
+    let values: [String]
+    let defaultValue: String
+}
+
 struct RelayAgent: Identifiable, Hashable {
     let id: String
     let name: String
     let detail: String
     let manifestURL: URL
     let adapterExecutablePath: String?
+    let usesGenericRuntime: Bool
     let registrationEnvironment: [String: String]
     let capabilities: Set<String>
     let versionExecutablePath: String?
     let versionArguments: [String]
+    var options: [RelayAgentOption] = []
     var version: String?
     var health: RelayAgentHealth
 
@@ -42,14 +51,23 @@ struct RelayAgent: Identifiable, Hashable {
     }
 }
 
+struct LineCLIConfiguration: Equatable {
+    let id: String
+    let name: String
+    let executablePath: String
+    let arguments: [String]
+}
+
 private struct AdapterManifest: Decodable {
     let schemaVersion: Int
     let id: String
     let name: String
     let detail: String
-    let adapterExecutable: String
+    let adapterExecutable: String?
+    let generic: AdapterGenericSpec?
     let capabilities: [String]
     let requirements: [AdapterRequirement]
+    let options: [AdapterManifestOption]?
     let versionLabel: String?
 
     enum CodingKeys: String, CodingKey {
@@ -58,9 +76,36 @@ private struct AdapterManifest: Decodable {
         case name
         case detail
         case adapterExecutable = "adapter_executable"
+        case generic
         case capabilities
         case requirements
+        case options
         case versionLabel = "version_label"
+    }
+}
+
+private struct AdapterManifestOption: Decodable {
+    let key: String
+    let label: String?
+    let values: [String]
+    let `default`: String?
+}
+
+private struct AdapterGenericSpec: Decodable {
+    let command: String
+    let arguments: [String]?
+    let newSessionArguments: [String]?
+    let resumeArguments: [String]?
+    let output: String?
+    let textPaths: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case command
+        case arguments
+        case newSessionArguments = "new_session_arguments"
+        case resumeArguments = "resume_arguments"
+        case output
+        case textPaths = "text_paths"
     }
 }
 
@@ -82,7 +127,8 @@ enum AdapterCatalog {
     static func load(
         bundledDirectory: URL?,
         userDirectory: URL,
-        home: URL
+        home: URL,
+        genericAdapter: URL? = nil
     ) -> [RelayAgent] {
         var agents: [RelayAgent] = []
         var identifiers = Set<String>()
@@ -96,7 +142,7 @@ enum AdapterCatalog {
                 .filter { $0.pathExtension.lowercased() == "json" }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
             for url in urls {
-                var agent = loadManifest(at: url, home: home)
+                var agent = loadManifest(at: url, home: home, genericAdapter: genericAdapter)
                 if identifiers.contains(agent.id), !agent.id.hasPrefix("invalid:") {
                     agent = invalidAgent(
                         at: url,
@@ -112,7 +158,7 @@ enum AdapterCatalog {
         return agents
     }
 
-    static func loadManifest(at url: URL, home: URL) -> RelayAgent {
+    static func loadManifest(at url: URL, home: URL, genericAdapter: URL? = nil) -> RelayAgent {
         let manifest: AdapterManifest
         do {
             manifest = try JSONDecoder().decode(AdapterManifest.self, from: Data(contentsOf: url))
@@ -125,11 +171,31 @@ enum AdapterCatalog {
             )
         }
 
-        let executable = resolvePath(
-            manifest.adapterExecutable,
-            relativeTo: url.deletingLastPathComponent(),
-            home: home
-        )
+        let executable: URL
+        if let adapterExecutable = manifest.adapterExecutable {
+            executable = resolvePath(
+                adapterExecutable,
+                relativeTo: url.deletingLastPathComponent(),
+                home: home
+            )
+        } else if let genericAdapter {
+            executable = genericAdapter
+        } else {
+            return RelayAgent(
+                id: manifest.id,
+                name: manifest.name,
+                detail: manifest.detail,
+                manifestURL: url,
+                adapterExecutablePath: nil,
+                usesGenericRuntime: true,
+                registrationEnvironment: [:],
+                capabilities: Set(manifest.capabilities),
+                versionExecutablePath: nil,
+                versionArguments: [],
+                version: manifest.versionLabel,
+                health: .missing("Generic adapter runtime is unavailable")
+            )
+        }
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             return RelayAgent(
                 id: manifest.id,
@@ -137,6 +203,7 @@ enum AdapterCatalog {
                 detail: manifest.detail,
                 manifestURL: url,
                 adapterExecutablePath: nil,
+                usesGenericRuntime: manifest.generic != nil,
                 registrationEnvironment: [:],
                 capabilities: Set(manifest.capabilities),
                 versionExecutablePath: nil,
@@ -166,6 +233,7 @@ enum AdapterCatalog {
                     detail: manifest.detail,
                     manifestURL: url,
                     adapterExecutablePath: executable.path,
+                    usesGenericRuntime: manifest.generic != nil,
                     registrationEnvironment: [:],
                     capabilities: Set(manifest.capabilities),
                     versionExecutablePath: nil,
@@ -180,6 +248,9 @@ enum AdapterCatalog {
                 versionArguments = requirement.versionArguments
             }
         }
+        if manifest.generic != nil {
+            environment["RELAY_GENERIC_SPEC"] = url.standardizedFileURL.path
+        }
 
         return RelayAgent(
             id: manifest.id,
@@ -187,13 +258,146 @@ enum AdapterCatalog {
             detail: manifest.detail,
             manifestURL: url,
             adapterExecutablePath: executable.path,
+            usesGenericRuntime: manifest.generic != nil,
             registrationEnvironment: environment,
             capabilities: Set(manifest.capabilities),
             versionExecutablePath: versionExecutablePath,
             versionArguments: versionArguments,
+            options: (manifest.options ?? []).map { option in
+                RelayAgentOption(
+                    key: option.key,
+                    label: option.label ?? option.key.uppercased(),
+                    values: option.values,
+                    defaultValue: option.default ?? option.values.first ?? ""
+                )
+            },
             version: manifest.versionLabel,
             health: .checking
         )
+    }
+
+    static func genericManifestData(
+        id rawID: String,
+        name rawName: String,
+        executablePath: String,
+        arguments: [String]
+    ) throws -> Data {
+        let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = id.utf8.first,
+              (48...57).contains(first) || (97...122).contains(first),
+              id.utf8.count <= 32,
+              id.utf8.allSatisfy({
+                  (48...57).contains($0) || (97...122).contains($0)
+                      || $0 == 45 || $0 == 95
+              }) else {
+            throw catalogError(
+                "CLI ID must start with a lowercase letter or number and then use letters, numbers, - or _"
+            )
+        }
+        guard !name.isEmpty,
+              name.utf8.count <= 64,
+              name.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            throw catalogError("CLI name must contain between 1 and 64 bytes")
+        }
+        guard executablePath.hasPrefix("/"),
+              executablePath.utf8.count <= 1024,
+              executablePath.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            throw catalogError("CLI executable must use an absolute path")
+        }
+        guard arguments.count <= 32,
+              arguments.allSatisfy({
+                  !$0.isEmpty && $0.utf8.count <= 512 && !$0.contains(where: \.isNewline)
+              }) else {
+            throw catalogError("CLI arguments must contain 1 to 512 bytes per line")
+        }
+
+        let environment = genericEnvironmentKey(for: id)
+        let manifest: [String: Any] = [
+            "schema_version": 1,
+            "id": id,
+            "name": name,
+            "detail": "Custom line CLI: \(name)",
+            "capabilities": [],
+            "generic": [
+                "command": environment,
+                "arguments": arguments,
+            ],
+            "requirements": [[
+                "name": name,
+                "environment": environment,
+                "candidates": [executablePath],
+                "version_arguments": [],
+            ]],
+        ]
+        return try JSONSerialization.data(
+            withJSONObject: manifest,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+    }
+
+    static func lineCLIConfiguration(at url: URL) -> LineCLIConfiguration? {
+        do {
+            let data = try Data(contentsOf: url)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(object.keys) == [
+                      "schema_version", "id", "name", "detail", "capabilities", "generic",
+                      "requirements",
+                  ],
+                  let genericObject = object["generic"] as? [String: Any],
+                  Set(genericObject.keys) == ["command", "arguments"],
+                  let requirementObjects = object["requirements"] as? [[String: Any]],
+                  requirementObjects.count == 1,
+                  let requirementObject = requirementObjects.first,
+                  Set(requirementObject.keys) == [
+                      "name", "environment", "candidates", "version_arguments",
+                  ] else {
+                return nil
+            }
+
+            let manifest = try JSONDecoder().decode(AdapterManifest.self, from: data)
+            try validate(manifest)
+            guard manifest.adapterExecutable == nil,
+                  manifest.capabilities.isEmpty,
+                  manifest.options == nil,
+                  manifest.versionLabel == nil,
+                  let generic = manifest.generic,
+                  generic.newSessionArguments == nil,
+                  generic.resumeArguments == nil,
+                  generic.output == nil,
+                  generic.textPaths == nil,
+                  let arguments = generic.arguments,
+                  manifest.requirements.count == 1,
+                  let requirement = manifest.requirements.first,
+                  requirement.name == manifest.name,
+                  requirement.environment == genericEnvironmentKey(for: manifest.id),
+                  generic.command == requirement.environment,
+                  requirement.candidates.count == 1,
+                  let executablePath = requirement.candidates.first,
+                  executablePath.hasPrefix("/"),
+                  requirement.versionArguments.isEmpty,
+                  manifest.detail == "Custom line CLI: \(manifest.name)" else {
+                return nil
+            }
+            return LineCLIConfiguration(
+                id: manifest.id,
+                name: manifest.name,
+                executablePath: executablePath,
+                arguments: arguments
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func genericEnvironmentKey(for id: String) -> String {
+        "RELAY_" + id.uppercased().map {
+            $0.isLetter || $0.isNumber ? String($0) : "_"
+        }.joined() + "_PATH"
     }
 
     private static func validate(_ manifest: AdapterManifest) throws {
@@ -211,9 +415,22 @@ enum AdapterCatalog {
               manifest.detail.utf8.count <= 160 else {
             throw catalogError("Adapter detail is invalid")
         }
-        guard !manifest.adapterExecutable.isEmpty,
-              manifest.adapterExecutable.utf8.count <= 1024 else {
-            throw catalogError("Adapter executable path is invalid")
+        let options = manifest.options ?? []
+        try validateOptionPresentation(options)
+        if manifest.generic == nil {
+            try validateAdapterOptions(options)
+        }
+        switch (manifest.adapterExecutable, manifest.generic) {
+        case (nil, nil):
+            throw catalogError("Adapter must declare adapter_executable or generic")
+        case (.some, .some):
+            throw catalogError("adapter_executable and generic cannot both be declared")
+        case let (.some(adapterExecutable), nil):
+            guard !adapterExecutable.isEmpty, adapterExecutable.utf8.count <= 1024 else {
+                throw catalogError("Adapter executable path is invalid")
+            }
+        case (nil, .some):
+            break
         }
         guard manifest.capabilities.count <= 16,
               Set(manifest.capabilities).count == manifest.capabilities.count,
@@ -244,6 +461,60 @@ enum AdapterCatalog {
         }
     }
 
+    static func isUserManifest(_ manifestURL: URL, userDirectory: URL) -> Bool {
+        manifestURL.standardizedFileURL.path
+            .hasPrefix(userDirectory.standardizedFileURL.path + "/")
+    }
+
+    static func importBlockReason(
+        candidateID: String,
+        destination: URL,
+        agents: [RelayAgent]
+    ) -> String? {
+        agents.first { agent in
+            agent.id == candidateID
+                && agent.manifestURL.standardizedFileURL.path
+                    != destination.standardizedFileURL.path
+        }
+        .map { "Adapter ID \(candidateID) is already provided by \($0.manifestURL.lastPathComponent)" }
+    }
+
+    private static func validateOptionPresentation(_ options: [AdapterManifestOption]) throws {
+        for option in options {
+            if let label = option.label, label.isEmpty || label.utf8.count > 24 {
+                throw catalogError("Manifest option label is invalid: \(option.key)")
+            }
+        }
+    }
+
+    private static func validateAdapterOptions(_ options: [AdapterManifestOption]) throws {
+        guard options.count <= 8 else {
+            throw catalogError("A manifest allows at most 8 options")
+        }
+        var keys = Set<String>()
+        for option in options {
+            guard !option.key.isEmpty,
+                  option.key.utf8.count <= 32,
+                  !option.key.hasPrefix("relay"),
+                  option.key.utf8.allSatisfy({
+                      (48...57).contains($0) || (97...122).contains($0)
+                          || $0 == 95 || $0 == 45
+                  }),
+                  keys.insert(option.key).inserted else {
+                throw catalogError("Manifest option key is invalid: \(option.key)")
+            }
+            guard (1...24).contains(option.values.count),
+                  option.values.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 64 }) else {
+                throw catalogError("Manifest option values are invalid: \(option.key)")
+            }
+            if let defaultValue = option.default, !option.values.contains(defaultValue) {
+                throw catalogError(
+                    "Manifest option default is not among its values: \(option.key)"
+                )
+            }
+        }
+    }
+
     private static func resolvePath(_ path: String, relativeTo directory: URL, home: URL) -> URL {
         if path == "~" {
             return home.standardizedFileURL
@@ -264,6 +535,7 @@ enum AdapterCatalog {
             detail: "Adapter manifest",
             manifestURL: url,
             adapterExecutablePath: nil,
+            usesGenericRuntime: false,
             registrationEnvironment: [:],
             capabilities: [],
             versionExecutablePath: nil,

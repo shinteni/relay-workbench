@@ -3,7 +3,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 use anyhow::{Context, Result, bail};
 use cli_adapters::{emit, emit_interaction, read_request, resolve_cli};
@@ -216,11 +219,33 @@ fn run_turn(
     )?;
 
     let mut pending = HashMap::<String, PendingRequest>::new();
+    let mut open_items = 0usize;
+    let mut last_activity = Instant::now();
     loop {
-        match receiver.recv().context("Codex event stream closed")? {
+        let event = match receiver.recv_timeout(IDLE_POLL_INTERVAL) {
+            Ok(event) => event,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if pending.is_empty() && open_items == 0 && last_activity.elapsed() >= IDLE_TIMEOUT
+                {
+                    bail!(
+                        "Codex produced no activity for {} minutes; treating the app server as hung. The session is preserved and can be continued.",
+                        IDLE_TIMEOUT.as_secs() / 60
+                    );
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => bail!("Codex event stream closed"),
+        };
+        last_activity = Instant::now();
+        match event {
             ProcessEvent::AppServer(line) => {
                 let value: Value = serde_json::from_str(&line)
                     .with_context(|| format!("failed to decode Codex app-server event: {line}"))?;
+                match value.get("method").and_then(Value::as_str) {
+                    Some("item/started") => open_items += 1,
+                    Some("item/completed") => open_items = open_items.saturating_sub(1),
+                    _ => {}
+                }
                 if value.get("method").is_some() && value.get("id").is_some() {
                     handle_server_request(request, app_stdin, &mut pending, &value)?;
                 } else if let Some(terminal) = handle_notification(request, &value)? {

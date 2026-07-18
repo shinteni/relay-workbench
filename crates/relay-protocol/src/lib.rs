@@ -3,8 +3,30 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+const PROTOCOL_VERSION_TEXT: &str =
+    include_str!("../../../apps/RelayGUI/Sources/RelayGUI/Resources/protocol-version.txt");
+pub const PROTOCOL_VERSION: u32 = parse_protocol_version(PROTOCOL_VERSION_TEXT);
+
+const fn parse_protocol_version(value: &str) -> u32 {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let mut result = 0u32;
+    let mut has_digit = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte >= b'0' && byte <= b'9' {
+            has_digit = true;
+            result = result * 10 + (byte - b'0') as u32;
+        } else if byte != b' ' && byte != b'\t' && byte != b'\r' && byte != b'\n' {
+            panic!("invalid protocol version");
+        }
+        index += 1;
+    }
+    assert!(has_digit && result > 0, "invalid protocol version");
+    result
+}
 pub const MAX_PROMPT_BYTES: usize = 512 * 1024;
+pub const MAX_CHAIN_STEPS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +133,13 @@ pub struct TaskOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainStep {
+    pub adapter_id: String,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonRequest {
     Ping,
@@ -121,6 +150,14 @@ pub enum DaemonRequest {
         cwd: PathBuf,
         #[serde(default)]
         options: BTreeMap<String, String>,
+    },
+    StartChain {
+        id: Uuid,
+        prompt: String,
+        cwd: PathBuf,
+        steps: Vec<ChainStep>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     ContinueTask {
         id: Uuid,
@@ -155,6 +192,9 @@ pub enum DaemonRequest {
         #[serde(default)]
         environment: BTreeMap<String, String>,
     },
+    UnregisterAdapter {
+        id: String,
+    },
     Shutdown,
 }
 
@@ -181,6 +221,9 @@ pub enum DaemonResponse {
         task_id: Uuid,
     },
     AdapterRegistered {
+        adapter_id: String,
+    },
+    AdapterUnregistered {
         adapter_id: String,
     },
     ShuttingDown,
@@ -265,6 +308,33 @@ mod tests {
     }
 
     #[test]
+    fn chain_request_round_trips() {
+        let request = DaemonRequest::StartChain {
+            id: Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            prompt: "review this change".to_owned(),
+            cwd: PathBuf::from("/tmp/project"),
+            steps: vec![
+                ChainStep {
+                    adapter_id: "codex".to_owned(),
+                    options: BTreeMap::from([("codex_mode".to_owned(), "plan".to_owned())]),
+                },
+                ChainStep {
+                    adapter_id: "claude".to_owned(),
+                    options: BTreeMap::new(),
+                },
+            ],
+            note: Some("Verify the previous answer.".to_owned()),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], json!("start_chain"));
+        assert_eq!(value["steps"][0]["adapter_id"], json!("codex"));
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(value).unwrap(),
+            request
+        );
+    }
+
+    #[test]
     fn daemon_response_has_type_tag_and_round_trips() {
         let response = DaemonResponse::Task {
             task: task_snapshot(),
@@ -330,6 +400,29 @@ mod tests {
     }
 
     #[test]
+    fn adapter_unregistration_round_trips() {
+        let request = DaemonRequest::UnregisterAdapter {
+            id: "gemini".to_owned(),
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["type"], json!("unregister_adapter"));
+        assert_eq!(
+            serde_json::from_value::<DaemonRequest>(value).unwrap(),
+            request
+        );
+
+        let response = DaemonResponse::AdapterUnregistered {
+            adapter_id: "gemini".to_owned(),
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["type"], json!("adapter_unregistered"));
+        assert_eq!(
+            serde_json::from_value::<DaemonResponse>(value).unwrap(),
+            response
+        );
+    }
+
+    #[test]
     fn adapter_messages_round_trip() {
         let task_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let request = AdapterRunRequest {
@@ -387,7 +480,7 @@ mod tests {
             adapters: vec!["codex".to_owned(), "claude".to_owned()],
         };
         let value: Value = serde_json::to_value(response).unwrap();
-        assert_eq!(value["protocol_version"], json!(7));
+        assert_eq!(value["protocol_version"], json!(PROTOCOL_VERSION));
         assert_eq!(value["adapters"], json!(["codex", "claude"]));
     }
 

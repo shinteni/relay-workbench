@@ -39,7 +39,7 @@ fn run() -> Result<()> {
         TaskStatus::Starting,
         Some("Starting Claude CLI".to_owned()),
         None,
-        Some(session_id.clone()),
+        None,
     )?;
 
     let mut arguments = vec![
@@ -92,7 +92,7 @@ fn run() -> Result<()> {
             TaskStatus::Completed,
             Some("Claude completed".to_owned()),
             None,
-            None,
+            Some(session_id),
         )?;
         Ok(())
     } else {

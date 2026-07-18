@@ -6,7 +6,7 @@ use clap::Parser;
 use relayd::{AdapterRegistration, DaemonConfig};
 
 #[derive(Debug, Parser)]
-#[command(about = "Local multi-CLI task daemon")]
+#[command(version, about = "Local multi-CLI task daemon")]
 struct Arguments {
     #[arg(long)]
     socket: PathBuf,

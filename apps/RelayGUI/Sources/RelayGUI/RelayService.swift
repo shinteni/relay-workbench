@@ -120,6 +120,15 @@ struct RelayTask: Codable, Identifiable, Hashable {
     let turnCount: UInt32
     let adapterOptions: [String: String]
 
+    var compareGroup: String? { adapterOptions["relay_group"] }
+    var chainStep: Int? { adapterOptions["relay_chain_step"].flatMap(Int.init) }
+    var chainAgents: [String]? {
+        adapterOptions["relay_chain_agents"].map {
+            $0.split(separator: ",").map(String.init)
+        }
+    }
+    var chainNote: String? { adapterOptions["relay_chain_note"] }
+
     enum CodingKeys: String, CodingKey {
         case id
         case adapterID = "adapter_id"
@@ -188,6 +197,39 @@ enum DaemonState: Equatable {
     }
 }
 
+enum DaemonLaunchConfiguration {
+    static func executablePath(fromPropertyList data: Data) -> String? {
+        guard let propertyList = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+            let arguments = propertyList["ProgramArguments"] as? [String],
+            let executable = arguments.first,
+            !executable.isEmpty else {
+            return nil
+        }
+        return executable
+    }
+
+    static func requiresReplacement(
+        runningVersion: String,
+        bundledVersion: String,
+        installedExecutable: String?,
+        bundledExecutable: String
+    ) -> Bool {
+        if runningVersion != bundledVersion {
+            return true
+        }
+        guard let installedExecutable else { return false }
+        return normalized(installedExecutable) != normalized(bundledExecutable)
+    }
+
+    private static func normalized(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+}
+
 private enum RelayClientError: LocalizedError {
     case missingResource(String)
     case commandFailed(String)
@@ -195,6 +237,9 @@ private enum RelayClientError: LocalizedError {
     case daemonUnavailable
     case invalidDirectory(String)
     case unavailableAgent(String)
+    case adapterImportRejected(String)
+    case legacyDaemonHasActiveTasks(Int)
+    case legacyDaemonUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -210,6 +255,12 @@ private enum RelayClientError: LocalizedError {
             "Working directory does not exist: \(path)"
         case let .unavailableAgent(name):
             "\(name) CLI was not found on this Mac."
+        case let .adapterImportRejected(reason):
+            "Adapter import rejected: \(reason)"
+        case let .legacyDaemonHasActiveTasks(count):
+            "Relay v0.12 still has \(count) active task(s). Reopen this app after they finish so the daemon can be upgraded safely."
+        case .legacyDaemonUnavailable:
+            "Relay v0.12 daemon is loaded but its task state cannot be read. It was left running to protect existing work."
         }
     }
 }
@@ -229,21 +280,40 @@ final class RelayService: ObservableObject {
     @Published var selectedTaskID: String?
     @Published var selectedAgentID = "codex"
     @Published var workingDirectory: String
+    @Published private(set) var defaultWorkingDirectory: String
     @Published var mixModel: String
     @Published var mixEffort: String
     @Published var codexMode: RelayCodexMode
+    @Published private(set) var language: RelayLanguage
     @Published var errorMessage: String?
+    @Published private(set) var compareMode = false
+    @Published private(set) var compareSelection: Set<String> = []
+    @Published private(set) var groupOutputs: [String: [RelayTaskOutput]] = [:]
+    @Published private(set) var agentOptionValues: [String: [String: String]] = [:]
+    @Published private(set) var chainMode = false
+    @Published private(set) var chainSequence: [String] = []
+    @Published var chainNote = ""
 
-    private var hasStarted = false
+    private var monitoringTask: Task<Void, Never>?
     private var isComposingNewThread = false
+    private var outputSyncKey: String?
+    private var outputSyncSkips = 0
+    private var groupSyncKeys: [String: String] = [:]
+    private var groupSyncSkips: [String: Int] = [:]
     private let mixEffortsByModel: [String: [String]]
     private let applicationDirectory: URL
     private let adapterDirectory: URL
     private let bundledAdapterDirectory: URL?
+    private let genericAdapterURL: URL?
     private let homeDirectory: URL
     private let runtimeDirectory: URL
     private let socketURL: URL
-    private static let daemonLabel = "local.tenishin.relay.daemon.v7"
+    private static let daemonLabel = RelayProtocol.daemonLabel
+    private static let legacyDaemonLabel = RelayProtocol.legacyDaemonLabel
+
+    private var daemonPlistURL: URL {
+        runtimeDirectory.appendingPathComponent(RelayProtocol.daemonPropertyListName)
+    }
 
     init() {
         let support = FileManager.default.urls(
@@ -254,12 +324,16 @@ final class RelayService: ObservableObject {
         adapterDirectory = applicationDirectory.appendingPathComponent("adapters", isDirectory: true)
         bundledAdapterDirectory = Bundle.main.resourceURL?
             .appendingPathComponent("adapters", isDirectory: true)
+        genericAdapterURL = Bundle.main.resourceURL?
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("generic-adapter")
         homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         runtimeDirectory = applicationDirectory.appendingPathComponent("runtime", isDirectory: true)
-        socketURL = runtimeDirectory.appendingPathComponent("relay-v7.sock")
+        socketURL = runtimeDirectory.appendingPathComponent(RelayProtocol.socketName)
         let home = homeDirectory
         let savedDirectory = UserDefaults.standard.string(forKey: "workingDirectory")
         workingDirectory = savedDirectory ?? home.path
+        defaultWorkingDirectory = savedDirectory ?? home.path
         let catalog = Self.loadCodexModels(home: home)
         mixModels = catalog.models
         mixEffortsByModel = catalog.efforts
@@ -276,14 +350,17 @@ final class RelayService: ObservableObject {
         codexMode = RelayCodexMode(
             rawValue: UserDefaults.standard.string(forKey: "codexMode") ?? "default"
         ) ?? .defaultMode
+        language = RelayLanguage.load()
         agents = AdapterCatalog.load(
             bundledDirectory: bundledAdapterDirectory,
             userDirectory: adapterDirectory,
-            home: home
+            home: home,
+            genericAdapter: genericAdapterURL
         )
         if !agents.contains(where: { $0.id == selectedAgentID }) {
             selectedAgentID = agents.first?.id ?? ""
         }
+        loadAgentOptionValues()
     }
 
     var selectedTask: RelayTask? {
@@ -295,20 +372,49 @@ final class RelayService: ObservableObject {
     }
 
     var canSubmit: Bool {
-        guard daemonState == .online, selectedAgent?.isAvailable == true else { return false }
+        guard daemonState == .online else { return false }
+        if chainMode {
+            guard let first = chainSequence.first,
+                  agents.first(where: { $0.id == first })?.isAvailable == true else { return false }
+        } else if compareMode {
+            guard compareSelection.contains(where: { id in
+                agents.first(where: { $0.id == id })?.isAvailable == true
+            }) else { return false }
+        } else if selectedAgent?.isAvailable != true {
+            return false
+        }
         return selectedTask?.status.isTerminal != false
     }
 
-    func run() async {
-        guard !hasStarted else { return }
-        hasStarted = true
-        await connect()
+    func startMonitoring() {
+        guard monitoringTask == nil else { return }
+        monitoringTask = Task { [weak self] in
+            await self?.runMonitoringLoop()
+        }
+    }
 
+    func stopMonitoring() {
+        monitoringTask?.cancel()
+        monitoringTask = nil
+    }
+
+    private func runMonitoringLoop() async {
         while !Task.isCancelled {
-            if daemonState == .online {
-                await refreshTasks(showErrors: false)
+            if daemonState != .online {
+                await connect()
             }
-            try? await Task.sleep(for: .seconds(1))
+            if daemonState == .online {
+                do {
+                    try await watchTaskUpdates()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    daemonState = .offline
+                }
+            }
+            if !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 
@@ -324,14 +430,248 @@ final class RelayService: ObservableObject {
         await loadAgentVersions()
     }
 
+    var userAdapterDirectory: URL { adapterDirectory }
+
+    func isUserAdapter(_ agent: RelayAgent) -> Bool {
+        AdapterCatalog.isUserManifest(agent.manifestURL, userDirectory: adapterDirectory)
+    }
+
+    func lineCLIConfiguration(for agent: RelayAgent) -> LineCLIConfiguration? {
+        guard isUserAdapter(agent) else { return nil }
+        return AdapterCatalog.lineCLIConfiguration(at: agent.manifestURL)
+    }
+
+    func importAdapter(from source: URL) async {
+        let accessing = source.startAccessingSecurityScopedResource()
+        defer {
+            if accessing {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            try prepareRuntimeDirectory()
+            let candidate = AdapterCatalog.loadManifest(
+                at: source,
+                home: homeDirectory,
+                genericAdapter: genericAdapterURL
+            )
+            if case let .invalid(reason) = candidate.health {
+                throw RelayClientError.adapterImportRejected(reason)
+            }
+            try await validateGenericManifest(candidate)
+            let fileManager = FileManager.default
+            let destination = adapterDirectory.appendingPathComponent(source.lastPathComponent)
+            if let conflict = AdapterCatalog.importBlockReason(
+                candidateID: candidate.id,
+                destination: destination,
+                agents: agents
+            ) {
+                throw RelayClientError.adapterImportRejected(conflict)
+            }
+            if fileManager.fileExists(atPath: destination.path) {
+                let existing = AdapterCatalog.loadManifest(
+                    at: destination,
+                    home: homeDirectory,
+                    genericAdapter: genericAdapterURL
+                )
+                if !existing.id.hasPrefix("invalid:"), existing.id != candidate.id {
+                    throw RelayClientError.adapterImportRejected(
+                        "\(destination.lastPathComponent) already provides adapter \(existing.id); rename the imported file"
+                    )
+                }
+            }
+            let probe = adapterDirectory.appendingPathComponent(".import-\(UUID().uuidString).json")
+            try fileManager.copyItem(at: source, to: probe)
+            defer { try? fileManager.removeItem(at: probe) }
+            let relocated = AdapterCatalog.loadManifest(
+                at: probe,
+                home: homeDirectory,
+                genericAdapter: genericAdapterURL
+            )
+            if relocated.health != candidate.health,
+               let reason = relocated.health.reason {
+                throw RelayClientError.adapterImportRejected(
+                    "\(reason) — the manifest references files relative to its source directory; move them into the adapter directory first"
+                )
+            }
+            if fileManager.fileExists(atPath: destination.path) {
+                try fileManager.removeItem(at: destination)
+            }
+            try fileManager.copyItem(at: source, to: destination)
+            errorMessage = nil
+            await refreshAll()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func createLineCLIAdapter(
+        id rawID: String,
+        name: String,
+        executablePath: String,
+        arguments: [String]
+    ) async -> Bool {
+        do {
+            try prepareRuntimeDirectory()
+            let id = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let executable = try validatedLineCLIExecutable(executablePath)
+            let data = try AdapterCatalog.genericManifestData(
+                id: id,
+                name: name,
+                executablePath: executable.path,
+                arguments: arguments
+            )
+            let destination = adapterDirectory.appendingPathComponent("\(id).json")
+            if let conflict = AdapterCatalog.importBlockReason(
+                candidateID: id,
+                destination: destination,
+                agents: agents
+            ) {
+                throw RelayClientError.adapterImportRejected(conflict)
+            }
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                throw RelayClientError.adapterImportRejected(
+                    "\(destination.lastPathComponent) already exists"
+                )
+            }
+
+            try data.write(to: destination, options: .atomic)
+            do {
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: destination.path
+                )
+                let installed = AdapterCatalog.loadManifest(
+                    at: destination,
+                    home: homeDirectory,
+                    genericAdapter: genericAdapterURL
+                )
+                guard installed.id == id, installed.health == .checking else {
+                    throw RelayClientError.adapterImportRejected(
+                        installed.health.reason ?? "Generated manifest could not be loaded"
+                    )
+                }
+                try await validateGenericManifest(installed)
+            } catch {
+                try? FileManager.default.removeItem(at: destination)
+                throw error
+            }
+
+            errorMessage = nil
+            await refreshAll()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func updateLineCLIAdapter(
+        _ agent: RelayAgent,
+        name: String,
+        executablePath: String,
+        arguments: [String]
+    ) async -> Bool {
+        do {
+            guard isUserAdapter(agent),
+                  let configuration = AdapterCatalog.lineCLIConfiguration(at: agent.manifestURL),
+                  configuration.id == agent.id else {
+                throw RelayClientError.adapterImportRejected(
+                    "Only simple line CLI adapters created by Relay can be edited here"
+                )
+            }
+            let executable = try validatedLineCLIExecutable(executablePath)
+            let data = try AdapterCatalog.genericManifestData(
+                id: configuration.id,
+                name: name,
+                executablePath: executable.path,
+                arguments: arguments
+            )
+            let original = try Data(contentsOf: agent.manifestURL)
+            try data.write(to: agent.manifestURL, options: .atomic)
+            do {
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: agent.manifestURL.path
+                )
+                let installed = AdapterCatalog.loadManifest(
+                    at: agent.manifestURL,
+                    home: homeDirectory,
+                    genericAdapter: genericAdapterURL
+                )
+                guard installed.id == configuration.id, installed.health == .checking else {
+                    throw RelayClientError.adapterImportRejected(
+                        installed.health.reason ?? "Updated manifest could not be loaded"
+                    )
+                }
+                try await validateGenericManifest(installed)
+            } catch {
+                try? original.write(to: agent.manifestURL, options: .atomic)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: agent.manifestURL.path
+                )
+                throw error
+            }
+
+            errorMessage = nil
+            await refreshAll()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteUserAdapter(_ agent: RelayAgent) async {
+        guard isUserAdapter(agent) else { return }
+        do {
+            let response = try await request(["unregister-adapter", "--id", agent.id])
+            guard response.type == "adapter_unregistered",
+                  response.adapterID == agent.id else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            do {
+                try FileManager.default.removeItem(at: agent.manifestURL)
+            } catch {
+                await synchronizeAdapters()
+                throw error
+            }
+            errorMessage = nil
+            await refreshAll()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func validatedLineCLIExecutable(_ rawPath: String) throws -> URL {
+        let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.hasPrefix("/") else {
+            throw RelayClientError.adapterImportRejected(
+                "CLI executable must use an absolute path"
+            )
+        }
+        let executable = URL(fileURLWithPath: path).standardizedFileURL
+        let values = try executable.resourceValues(forKeys: [.isRegularFileKey])
+        guard values.isRegularFile == true,
+              FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw RelayClientError.adapterImportRejected(
+                "CLI executable was not found or is not executable: \(executable.path)"
+            )
+        }
+        return executable
+    }
+
     func selectAgent(_ id: String) {
         guard agents.contains(where: { $0.id == id }) else { return }
         selectedAgentID = id
         selectedTaskID = nil
+        workingDirectory = defaultWorkingDirectory
         isComposingNewThread = true
         output = []
         outputTruncated = false
         errorMessage = nil
+        restorePersistedAdapterSettings()
     }
 
     func selectTask(_ id: String) {
@@ -343,45 +683,313 @@ final class RelayService: ObservableObject {
         applyAdapterSettings(from: task)
         output = []
         outputTruncated = false
-        Task { await refreshSelectedOutput(showErrors: true) }
+        Task { await refreshSelectedOutput(showErrors: true, force: true) }
     }
 
     func startNewThread() {
         selectedTaskID = nil
+        workingDirectory = defaultWorkingDirectory
         selectFallbackAgentIfNeeded()
         isComposingNewThread = true
         output = []
         outputTruncated = false
         errorMessage = nil
+        restorePersistedAdapterSettings()
+    }
+
+    func toggleCompareMode() {
+        compareMode.toggle()
+        if compareMode {
+            chainMode = false
+            chainSequence = []
+            compareSelection = selectedAgentID.isEmpty ? [] : [selectedAgentID]
+            startNewThread()
+        } else {
+            compareSelection = []
+        }
+    }
+
+    func toggleChainMode() {
+        chainMode.toggle()
+        if chainMode {
+            compareMode = false
+            compareSelection = []
+            chainSequence = selectedAgentID.isEmpty ? [] : [selectedAgentID]
+            startNewThread()
+        } else {
+            chainSequence = []
+        }
+    }
+
+    func appendChainAgent(_ id: String) {
+        guard chainMode,
+              chainSequence.count < 4,
+              agents.contains(where: { $0.id == id }) else { return }
+        chainSequence.append(id)
+    }
+
+    func clearChainSequence() {
+        chainSequence = []
+    }
+
+    func removeLastChainAgent() {
+        guard !chainSequence.isEmpty else { return }
+        chainSequence.removeLast()
+    }
+
+    func submitChain(prompt: String) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isSubmitting else { return }
+        guard chainSequence.count >= 2 else {
+            errorMessage = "Add at least two chain steps."
+            return
+        }
+        let missing = chainSequence.first { id in
+            agents.first(where: { $0.id == id })?.isAvailable != true
+        }
+        if let missing {
+            errorMessage = RelayClientError.unavailableAgent(missing).localizedDescription
+            return
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: workingDirectory,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            errorMessage = RelayClientError.invalidDirectory(workingDirectory).localizedDescription
+            return
+        }
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        let chain = UUID().uuidString.lowercased()
+        var arguments = [
+            "start-chain",
+            "--id", chain,
+            "--stdin",
+            "--cwd", workingDirectory,
+        ]
+        for (index, adapterID) in chainSequence.enumerated() {
+            arguments += ["--step", adapterID]
+            for (key, value) in adapterOptions(for: adapterID).sorted(by: { $0.key < $1.key }) {
+                arguments += ["--step-option", "\(index + 1):\(key)=\(value)"]
+            }
+        }
+        let note = sanitizedChainNote
+        if !note.isEmpty {
+            arguments += ["--note", note]
+        }
+        do {
+            let response = try await request(arguments, input: Data(trimmed.utf8))
+            guard response.type == "task", let task = response.task else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            selectedTaskID = task.id
+            isComposingNewThread = false
+            chainMode = false
+            chainSequence = []
+            chainNote = ""
+            errorMessage = nil
+            await refreshTasks(showErrors: true)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private var sanitizedChainNote: String {
+        let flattened = chainNote
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+        let sanitized = flattened
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .unicodeScalars
+            .filter { !CharacterSet.controlCharacters.contains($0) }
+            .map(String.init)
+            .joined()
+        return String(sanitized.prefix(200))
+    }
+
+    func handoff(to agentID: String, instruction: String) async {
+        guard !isSubmitting, let source = selectedTask else { return }
+        guard source.status.isTerminal else {
+            errorMessage = "The selected task is still running."
+            return
+        }
+        guard let target = agents.first(where: { $0.id == agentID }),
+              target.isAvailable else {
+            errorMessage = RelayClientError.unavailableAgent(agentID).localizedDescription
+            return
+        }
+        isSubmitting = true
+        defer { isSubmitting = false }
+        do {
+            var sourceOutput = output
+            if sourceOutput.isEmpty {
+                let response = try await request(["output", source.id])
+                guard response.type == "task_output", let received = response.output else {
+                    throw RelayClientError.invalidResponse(response.type)
+                }
+                sourceOutput = received
+            }
+            let transcript = ThreadCatalog.transcriptText(sourceOutput)
+            let extra = instruction.isEmpty ? "请基于以上上下文继续处理。" : instruction
+            let prompt = "以下是与 \(source.adapterID) 的既有对话上下文：\n\n\(transcript)\n\n\(extra)"
+            let response = try await request([
+                "start",
+                "--adapter", agentID,
+                "--stdin",
+                "--cwd", source.cwd,
+                "--option", "relay_handoff_from=\(source.shortID)",
+            ] + adapterOptionArguments(for: agentID), input: Data(prompt.utf8))
+            guard response.type == "task", let task = response.task else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            _ = try? await request([
+                "rename", task.id,
+                "--title", "⇄ \(String(source.displayTitle.prefix(48)))",
+            ])
+            selectedTaskID = task.id
+            isComposingNewThread = false
+            errorMessage = nil
+            await refreshTasks(showErrors: true)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func toggleCompareAgent(_ id: String) {
+        guard compareMode, agents.contains(where: { $0.id == id }) else { return }
+        if compareSelection.contains(id) {
+            compareSelection.remove(id)
+        } else {
+            compareSelection.insert(id)
+        }
+    }
+
+    func submitCompare(prompt: String) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isSubmitting else { return }
+        let members = agents.filter { compareSelection.contains($0.id) }
+        guard members.count >= 2 else {
+            errorMessage = "Select at least two agents to compare."
+            return
+        }
+        if let unavailable = members.first(where: { !$0.isAvailable }) {
+            errorMessage = RelayClientError.unavailableAgent(unavailable.name).localizedDescription
+            return
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: workingDirectory,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            errorMessage = RelayClientError.invalidDirectory(workingDirectory).localizedDescription
+            return
+        }
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        let group = UUID().uuidString.lowercased()
+        let promptData = Data(trimmed.utf8)
+        var firstMemberTaskID: String?
+        do {
+            for member in members.sorted(by: { $0.id < $1.id }) {
+                let response = try await request([
+                    "start",
+                    "--adapter", member.id,
+                    "--stdin",
+                    "--cwd", workingDirectory,
+                    "--option", "relay_group=\(group)",
+                ] + adapterOptionArguments(for: member.id), input: promptData)
+                guard response.type == "task", let task = response.task else {
+                    throw RelayClientError.invalidResponse(response.type)
+                }
+                if firstMemberTaskID == nil {
+                    firstMemberTaskID = task.id
+                }
+            }
+            selectedTaskID = firstMemberTaskID
+            isComposingNewThread = false
+            compareMode = false
+            compareSelection = []
+            errorMessage = nil
+            await refreshTasks(showErrors: true)
+        } catch {
+            errorMessage = error.localizedDescription
+            if firstMemberTaskID != nil {
+                selectedTaskID = firstMemberTaskID
+                isComposingNewThread = false
+                compareMode = false
+                compareSelection = []
+                await refreshTasks(showErrors: false)
+            }
+        }
+    }
+
+    private func restorePersistedAdapterSettings() {
+        codexMode = RelayCodexMode(
+            rawValue: UserDefaults.standard.string(forKey: "codexMode") ?? "default"
+        ) ?? .defaultMode
+        if let model = UserDefaults.standard.string(forKey: "mixModel"),
+           mixModels.contains(model) {
+            mixModel = model
+            mixEfforts = mixEffortsByModel[model] ?? Self.allMixEfforts
+        }
+        if let effort = UserDefaults.standard.string(forKey: "mixEffort"),
+           mixEfforts.contains(effort) {
+            mixEffort = effort
+        }
     }
 
     func setWorkingDirectory(_ path: String) {
         workingDirectory = path
+        defaultWorkingDirectory = path
         UserDefaults.standard.set(path, forKey: "workingDirectory")
     }
 
-    func setMixModel(_ model: String) {
+    func setDefaultWorkingDirectory(_ path: String) {
+        defaultWorkingDirectory = path
+        if selectedTaskID == nil {
+            workingDirectory = path
+        }
+        UserDefaults.standard.set(path, forKey: "workingDirectory")
+    }
+
+    func setMixModel(_ model: String, persist: Bool = true) {
         guard mixModels.contains(model) else { return }
         mixModel = model
         mixEfforts = mixEffortsByModel[model] ?? Self.allMixEfforts
         if !mixEfforts.contains(mixEffort) {
             mixEffort = mixEfforts.contains("max") ? "max" : mixEfforts.last ?? "high"
-            UserDefaults.standard.set(mixEffort, forKey: "mixEffort")
+            if persist {
+                UserDefaults.standard.set(mixEffort, forKey: "mixEffort")
+            }
         }
-        UserDefaults.standard.set(model, forKey: "mixModel")
+        if persist {
+            UserDefaults.standard.set(model, forKey: "mixModel")
+        }
     }
 
-    func setMixEffort(_ effort: String) {
+    func setMixEffort(_ effort: String, persist: Bool = true) {
         guard mixEfforts.contains(effort) else {
             return
         }
         mixEffort = effort
-        UserDefaults.standard.set(effort, forKey: "mixEffort")
+        if persist {
+            UserDefaults.standard.set(effort, forKey: "mixEffort")
+        }
     }
 
-    func setCodexMode(_ mode: RelayCodexMode) {
+    func setCodexMode(_ mode: RelayCodexMode, persist: Bool = true) {
         codexMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: "codexMode")
+        if persist {
+            UserDefaults.standard.set(mode.rawValue, forKey: "codexMode")
+        }
+    }
+
+    func setLanguage(_ language: RelayLanguage) {
+        self.language = language
+        language.save()
     }
 
     func refreshTasks(showErrors: Bool = true) async {
@@ -390,30 +998,43 @@ final class RelayService: ObservableObject {
             guard response.type == "tasks", let receivedTasks = response.tasks else {
                 throw RelayClientError.invalidResponse(response.type)
             }
-            tasks = receivedTasks.sorted { $0.updatedAtMilliseconds > $1.updatedAtMilliseconds }
-            if let selectedTaskID, !tasks.contains(where: { $0.id == selectedTaskID }) {
-                self.selectedTaskID = nil
-                output = []
-            }
-            if selectedTaskID == nil, !isComposingNewThread, let first = tasks.first {
-                selectedTaskID = first.id
-                selectedAgentID = first.adapterID
-                workingDirectory = first.cwd
-                applyAdapterSettings(from: first)
-            }
-            if selectedTaskID == nil {
-                selectFallbackAgentIfNeeded()
-            }
-            await refreshSelectedOutput(showErrors: showErrors)
-            daemonState = .online
-            if showErrors {
-                errorMessage = nil
-            }
+            await applyTaskList(receivedTasks, showErrors: showErrors)
         } catch {
             daemonState = await canPing() ? .online : .offline
             if showErrors {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    private func applyTaskList(_ receivedTasks: [RelayTask], showErrors: Bool) async {
+        tasks = receivedTasks.sorted { $0.updatedAtMilliseconds > $1.updatedAtMilliseconds }
+        if let selectedTaskID, !tasks.contains(where: { $0.id == selectedTaskID }) {
+            self.selectedTaskID = nil
+            output = []
+        }
+        if selectedTaskID == nil, !isComposingNewThread, let first = tasks.first {
+            selectedTaskID = first.id
+            selectedAgentID = first.adapterID
+            workingDirectory = first.cwd
+            applyAdapterSettings(from: first)
+        }
+        if selectedTaskID == nil {
+            selectFallbackAgentIfNeeded()
+        }
+        if selectedTask?.compareGroup != nil {
+            await refreshGroupOutputs(showErrors: showErrors)
+        } else {
+            if !groupOutputs.isEmpty {
+                groupOutputs = [:]
+                groupSyncKeys = [:]
+                groupSyncSkips = [:]
+            }
+            await refreshSelectedOutput(showErrors: showErrors)
+        }
+        daemonState = .online
+        if showErrors {
+            errorMessage = nil
         }
     }
 
@@ -551,7 +1172,10 @@ final class RelayService: ObservableObject {
         do {
             try prepareRuntimeDirectory()
             reloadAdapters()
-            if !(await canPing()) {
+            if await canPing() {
+                try await replaceCurrentDaemonIfIdle()
+            } else {
+                try await prepareLegacyDaemonForUpgrade()
                 try await launchDaemon(replacingExistingJob: false)
                 var connected = await waitForDaemon()
                 if !connected {
@@ -571,10 +1195,81 @@ final class RelayService: ObservableObject {
         }
     }
 
-    private func refreshSelectedOutput(showErrors: Bool) async {
+    private func replaceCurrentDaemonIfIdle() async throws {
+        let bundledVersion = try await bundledDaemonVersion()
+        let bundledRelayd = try bundledBinary(named: "relayd")
+        let installedExecutable = (try? Data(contentsOf: daemonPlistURL)).flatMap {
+            DaemonLaunchConfiguration.executablePath(fromPropertyList: $0)
+        }
+        guard DaemonLaunchConfiguration.requiresReplacement(
+            runningVersion: daemonVersion ?? "",
+            bundledVersion: bundledVersion,
+            installedExecutable: installedExecutable,
+            bundledExecutable: bundledRelayd.path
+        ) else { return }
+        let response = try await request(["list"])
+        guard response.type == "tasks", let tasks = response.tasks else {
+            throw RelayClientError.invalidResponse(response.type)
+        }
+        guard tasks.allSatisfy({ $0.status.isTerminal }) else { return }
+
+        try await launchDaemon(replacingExistingJob: true)
+        guard await waitForDaemon(), daemonVersion == bundledVersion else {
+            throw RelayClientError.daemonUnavailable
+        }
+    }
+
+    private func bundledDaemonVersion() async throws -> String {
+        let relayd = try bundledBinary(named: "relayd")
+        let data = try await runCommand(executable: relayd, arguments: ["--version"])
+        let output = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let version = output.split(whereSeparator: { $0.isWhitespace }).last,
+              version.contains(".") else {
+            throw RelayClientError.invalidResponse("relayd --version: \(output)")
+        }
+        return String(version)
+    }
+
+    private func refreshGroupOutputs(showErrors: Bool) async {
+        guard let selectedTaskID, let group = selectedTask?.compareGroup else { return }
+        for member in tasks where member.compareGroup == group {
+            let key = "\(member.id):\(member.updatedAtMilliseconds):\(member.status.rawValue)"
+            let skips = groupSyncSkips[member.id] ?? 0
+            if key == groupSyncKeys[member.id], skips < 5 {
+                groupSyncSkips[member.id] = skips + 1
+                continue
+            }
+            do {
+                let response = try await request(["output", member.id])
+                guard response.type == "task_output", let received = response.output else {
+                    throw RelayClientError.invalidResponse(response.type)
+                }
+                groupOutputs[member.id] = received
+                groupSyncKeys[member.id] = key
+                groupSyncSkips[member.id] = 0
+            } catch {
+                if showErrors {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+        output = groupOutputs[selectedTaskID] ?? []
+        outputTruncated = false
+    }
+
+    private func refreshSelectedOutput(showErrors: Bool, force: Bool = false) async {
         guard let selectedTaskID else {
             output = []
             outputTruncated = false
+            outputSyncKey = nil
+            return
+        }
+        let key = tasks.first { $0.id == selectedTaskID }.map {
+            "\($0.id):\($0.updatedAtMilliseconds):\($0.status.rawValue)"
+        }
+        if !force, let key, key == outputSyncKey, outputSyncSkips < 5 {
+            outputSyncSkips += 1
             return
         }
         do {
@@ -584,6 +1279,8 @@ final class RelayService: ObservableObject {
             }
             output = receivedOutput
             outputTruncated = response.truncated ?? false
+            outputSyncKey = key
+            outputSyncSkips = 0
         } catch {
             if showErrors {
                 errorMessage = error.localizedDescription
@@ -634,18 +1331,80 @@ final class RelayService: ObservableObject {
     private func canPing() async -> Bool {
         guard let response = try? await request(["ping"]),
               response.type == "pong",
-              response.protocolVersion == 7 else {
+              response.protocolVersion == RelayProtocol.current else {
             return false
         }
         daemonVersion = response.daemonVersion
         return true
     }
 
-    private func request(_ arguments: [String], input: Data? = nil) async throws -> RelayResponse {
+    private func watchTaskUpdates() async throws {
+        let relayctl = try bundledBinary(named: "relayctl")
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.executableURL = relayctl
+        process.arguments = [
+            "--socket", socketURL.path,
+            "watch", "--interval-ms", "1000",
+            "--parent-pid", String(getpid()),
+        ]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+
+        let errorTask = Task.detached {
+            errorPipe.fileHandleForReading.readDataToEndOfFile()
+        }
+        do {
+            try await withTaskCancellationHandler {
+                for try await line in outputPipe.fileHandleForReading.bytes.lines {
+                    try Task.checkCancellation()
+                    let response = try JSONDecoder().decode(
+                        RelayResponse.self,
+                        from: Data(line.utf8)
+                    )
+                    guard response.type == "tasks", let receivedTasks = response.tasks else {
+                        throw RelayClientError.invalidResponse(response.type)
+                    }
+                    await applyTaskList(receivedTasks, showErrors: false)
+                }
+                process.waitUntilExit()
+                let errorOutput = await errorTask.value
+                try Task.checkCancellation()
+                guard process.terminationStatus == 0 else {
+                    let message = String(data: errorOutput, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    throw RelayClientError.commandFailed(
+                        message?.isEmpty == false
+                            ? message!
+                            : "watch exited with status \(process.terminationStatus)"
+                    )
+                }
+            } onCancel: {
+                if process.isRunning {
+                    process.terminate()
+                }
+            }
+        } catch {
+            if process.isRunning {
+                process.terminate()
+            }
+            _ = await errorTask.value
+            throw error
+        }
+    }
+
+    private func request(
+        _ arguments: [String],
+        input: Data? = nil,
+        socket: URL? = nil
+    ) async throws -> RelayResponse {
         let relayctl = try bundledBinary(named: "relayctl")
         let data = try await runCommand(
             executable: relayctl,
-            arguments: ["--socket", socketURL.path] + arguments,
+            arguments: ["--socket", (socket ?? socketURL).path] + arguments,
             input: input
         )
         let response = try JSONDecoder().decode(RelayResponse.self, from: data)
@@ -655,6 +1414,31 @@ final class RelayService: ObservableObject {
             )
         }
         return response
+    }
+
+    private func prepareLegacyDaemonForUpgrade() async throws {
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let domain = "gui/\(getuid())"
+        let service = "\(domain)/\(Self.legacyDaemonLabel)"
+        guard (try? await runCommand(
+            executable: launchctl,
+            arguments: ["print", service]
+        )) != nil else { return }
+
+        let legacySocket = runtimeDirectory.appendingPathComponent(RelayProtocol.legacySocketName)
+        guard let response = try? await request(["list"], socket: legacySocket),
+              response.type == "tasks",
+              let tasks = response.tasks else {
+            throw RelayClientError.legacyDaemonUnavailable
+        }
+        let activeCount = tasks.lazy.filter { !$0.status.isTerminal }.count
+        guard activeCount == 0 else {
+            throw RelayClientError.legacyDaemonHasActiveTasks(activeCount)
+        }
+        _ = try await runCommand(
+            executable: launchctl,
+            arguments: ["bootout", service]
+        )
     }
 
     private func waitForDaemon() async -> Bool {
@@ -688,7 +1472,6 @@ final class RelayService: ObservableObject {
             )
         }
 
-        let plistURL = runtimeDirectory.appendingPathComponent("relayd-v7.plist")
         let propertyList: [String: Any] = [
             "Label": Self.daemonLabel,
             "ProgramArguments": [
@@ -708,14 +1491,14 @@ final class RelayService: ObservableObject {
             format: .xml,
             options: 0
         )
-        try data.write(to: plistURL, options: .atomic)
+        try data.write(to: daemonPlistURL, options: .atomic)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
-            ofItemAtPath: plistURL.path
+            ofItemAtPath: daemonPlistURL.path
         )
         _ = try await runCommand(
             executable: launchctl,
-            arguments: ["bootstrap", domain, plistURL.path]
+            arguments: ["bootstrap", domain, daemonPlistURL.path]
         )
     }
 
@@ -726,12 +1509,14 @@ final class RelayService: ObservableObject {
         agents = AdapterCatalog.load(
             bundledDirectory: bundledAdapterDirectory,
             userDirectory: adapterDirectory,
-            home: homeDirectory
+            home: homeDirectory,
+            genericAdapter: genericAdapterURL
         )
         for index in agents.indices where agents[index].version == nil {
             agents[index].version = previousVersions[agents[index].id]
         }
         selectFallbackAgentIfNeeded()
+        loadAgentOptionValues()
     }
 
     private func selectFallbackAgentIfNeeded() {
@@ -771,6 +1556,7 @@ final class RelayService: ObservableObject {
                 arguments.append(contentsOf: ["--environment", "\(key)=\(value)"])
             }
             do {
+                try await validateGenericManifest(agents[index])
                 let response = try await request(arguments)
                 guard response.type == "adapter_registered",
                       response.adapterID == agents[index].id else {
@@ -781,6 +1567,19 @@ final class RelayService: ObservableObject {
                 agents[index].health = .invalid(error.localizedDescription)
             }
         }
+    }
+
+    private func validateGenericManifest(_ agent: RelayAgent) async throws {
+        guard agent.usesGenericRuntime else { return }
+        guard let genericAdapterURL else {
+            throw RelayClientError.missingResource("generic-adapter")
+        }
+        _ = try await runCommand(
+            executable: genericAdapterURL,
+            arguments: [
+                "validate", "--spec", agent.manifestURL.standardizedFileURL.path,
+            ]
+        )
     }
 
     private func bundledBinary(named name: String) throws -> URL {
@@ -796,7 +1595,7 @@ final class RelayService: ObservableObject {
         return url
     }
 
-    private func runCommand(
+    func runCommand(
         executable: URL,
         arguments: [String],
         input: Data? = nil
@@ -821,9 +1620,15 @@ final class RelayService: ObservableObject {
                 try inputPipe.fileHandleForWriting.close()
             }
 
-            let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-            let errorOutput = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let outputTask = Task.detached {
+                outputPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            let errorTask = Task.detached {
+                errorPipe.fileHandleForReading.readDataToEndOfFile()
+            }
             process.waitUntilExit()
+            let output = await outputTask.value
+            let errorOutput = await errorTask.value
             guard process.terminationStatus == 0 else {
                 let message = String(data: errorOutput, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -837,35 +1642,73 @@ final class RelayService: ObservableObject {
         }.value
     }
 
-    private func adapterOptionArguments(for adapterID: String) -> [String] {
+    private func adapterOptions(for adapterID: String) -> [String: String] {
+        var values: [String: String] = [:]
+        let agent = agents.first { $0.id == adapterID }
         if adapterID == "codex", codexMode == .plan {
-            return ["--option", "codex_mode=plan"]
+            values["codex_mode"] = "plan"
         }
-        if agents.first(where: { $0.id == adapterID })?
-            .capabilities.contains("mix_model_options") == true {
-            return [
-                "--option", "codex_model=\(mixModel)",
-                "--option", "codex_reasoning_effort=\(mixEffort)",
-            ]
+        if agent?.capabilities.contains("mix_model_options") == true {
+            values["codex_model"] = mixModel
+            values["codex_reasoning_effort"] = mixEffort
         }
-        return []
+        for option in agent?.options ?? [] {
+            values[option.key] = agentOptionValue(agentID: adapterID, option: option)
+        }
+        return values
+    }
+
+    private func adapterOptionArguments(for adapterID: String) -> [String] {
+        adapterOptions(for: adapterID)
+            .sorted(by: { $0.key < $1.key })
+            .flatMap { ["--option", "\($0.key)=\($0.value)"] }
+    }
+
+    func agentOptionValue(agentID: String, option: RelayAgentOption) -> String {
+        agentOptionValues[agentID]?[option.key] ?? option.defaultValue
+    }
+
+    func setAgentOption(agentID: String, key: String, value: String) {
+        guard let agent = agents.first(where: { $0.id == agentID }),
+              let option = agent.options.first(where: { $0.key == key }),
+              option.values.contains(value) else { return }
+        agentOptionValues[agentID, default: [:]][key] = value
+        UserDefaults.standard.set(value, forKey: "agentOption.\(agentID).\(key)")
+    }
+
+    private func loadAgentOptionValues() {
+        var values: [String: [String: String]] = [:]
+        for agent in agents where !agent.options.isEmpty {
+            var perAgent: [String: String] = [:]
+            for option in agent.options {
+                let stored = UserDefaults.standard.string(
+                    forKey: "agentOption.\(agent.id).\(option.key)"
+                )
+                perAgent[option.key] = stored
+                    .flatMap { option.values.contains($0) ? $0 : nil }
+                    ?? option.defaultValue
+            }
+            values[agent.id] = perAgent
+        }
+        agentOptionValues = values
     }
 
     private func applyAdapterSettings(from task: RelayTask) {
         if task.adapterID == "codex" {
             setCodexMode(
-                task.adapterOptions["codex_mode"] == "plan" ? .plan : .defaultMode
+                task.adapterOptions["codex_mode"] == "plan" ? .plan : .defaultMode,
+                persist: false
             )
             return
         }
         guard agents.first(where: { $0.id == task.adapterID })?
             .capabilities.contains("mix_model_options") == true else { return }
         if let model = task.adapterOptions["codex_model"], mixModels.contains(model) {
-            setMixModel(model)
+            setMixModel(model, persist: false)
         }
         if let effort = task.adapterOptions["codex_reasoning_effort"],
            mixEfforts.contains(effort) {
-            setMixEffort(effort)
+            setMixEffort(effort, persist: false)
         }
     }
 

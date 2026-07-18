@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use relay_protocol::{
     AdapterEvent, AdapterInteraction, AdapterInteractionKind, AdapterInteractionResponse,
-    AdapterRunRequest, DaemonRequest, DaemonResponse, MAX_PROMPT_BYTES, PROTOCOL_VERSION,
-    TaskOutput, TaskOutputKind, TaskSnapshot, TaskStatus,
+    AdapterRunRequest, ChainStep, DaemonRequest, DaemonResponse, MAX_CHAIN_STEPS, MAX_PROMPT_BYTES,
+    PROTOCOL_VERSION, TaskOutput, TaskOutputKind, TaskSnapshot, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -52,11 +52,16 @@ const MAX_ADAPTER_OPTION_VALUE_BYTES: usize = 256;
 const MAX_ADAPTER_ENVIRONMENT: usize = 16;
 const MAX_ADAPTER_ENVIRONMENT_KEY_BYTES: usize = 64;
 const MAX_ADAPTER_ENVIRONMENT_VALUE_BYTES: usize = 1024;
+const MAX_CHAIN_NOTE_BYTES: usize = 256;
 const MAX_PERSISTED_TASK_BYTES: usize = 2 * 1024 * 1024;
 const TASK_STATE_VERSION: u32 = 1;
 const CLIENT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PROCESS_GROUP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PROCESS_GROUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const CHAIN_GROUP_OPTION: &str = "relay_group";
+const CHAIN_STEP_OPTION: &str = "relay_chain_step";
+const CHAIN_AGENTS_OPTION: &str = "relay_chain_agents";
+const CHAIN_NOTE_OPTION: &str = "relay_chain_note";
 
 #[derive(Debug, Clone)]
 pub struct AdapterRegistration {
@@ -82,10 +87,19 @@ struct TaskEntry {
     cancel: Option<oneshot::Sender<CancelRequest>>,
     runner: Option<JoinHandle<()>>,
     response_pending: bool,
+    chain: Option<ChainContext>,
 }
 
 struct CancelRequest {
     acknowledged: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChainContext {
+    id: Uuid,
+    step: usize,
+    steps: Vec<ChainStep>,
+    note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +108,8 @@ struct PersistedTask {
     snapshot: TaskSnapshot,
     output: Vec<TaskOutput>,
     output_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chain: Option<ChainContext>,
 }
 
 impl PersistedTask {
@@ -103,6 +119,7 @@ impl PersistedTask {
             snapshot: entry.snapshot.clone(),
             output: entry.output.clone(),
             output_truncated: entry.output_truncated,
+            chain: entry.chain.clone(),
         }
     }
 
@@ -114,6 +131,9 @@ impl PersistedTask {
             bail!("task state ID does not match its file name");
         }
         validate_persisted_snapshot(&self.snapshot)?;
+        if let Some(chain) = &self.chain {
+            validate_chain_context(&self.snapshot, chain)?;
+        }
         if self.output.len() > MAX_TASK_OUTPUT_EVENTS {
             bail!("persisted task has too many output events");
         }
@@ -145,6 +165,7 @@ impl PersistedTask {
             cancel: None,
             runner: None,
             response_pending: false,
+            chain: self.chain,
         })
     }
 }
@@ -275,6 +296,8 @@ struct TaskStore {
     interaction_responders: RwLock<HashMap<Uuid, mpsc::Sender<AdapterInteractionResponse>>>,
     persistence: TaskPersistence,
     persistence_lock: Mutex<()>,
+    chain_lock: Mutex<()>,
+    chain_notify: Notify,
 }
 
 impl TaskStore {
@@ -284,6 +307,8 @@ impl TaskStore {
             interaction_responders: RwLock::new(HashMap::new()),
             persistence,
             persistence_lock: Mutex::new(()),
+            chain_lock: Mutex::new(()),
+            chain_notify: Notify::new(),
         }
     }
 
@@ -366,6 +391,15 @@ pub async fn serve(config: DaemonConfig, shutdown: impl Future<Output = ()> + Se
     for id in interrupted_tasks {
         tasks.persist_task(id).await?;
     }
+    let scheduler_tasks = tasks.clone();
+    let scheduler_adapters = adapters.clone();
+    let chain_scheduler = tokio::spawn(async move {
+        loop {
+            scheduler_tasks.chain_notify.notified().await;
+            advance_pending_chains(&scheduler_tasks, &scheduler_adapters).await;
+        }
+    });
+    tasks.chain_notify.notify_one();
     let client_slots = Arc::new(Semaphore::new(MAX_CLIENT_CONNECTIONS));
     let mut client_tasks = JoinSet::new();
     let shutdown_requested = Arc::new(Notify::new());
@@ -409,6 +443,8 @@ pub async fn serve(config: DaemonConfig, shutdown: impl Future<Output = ()> + Se
     }
 
     client_tasks.shutdown().await;
+    chain_scheduler.abort();
+    let _ = chain_scheduler.await;
     shutdown_tasks(&tasks).await;
     Ok(())
 }
@@ -511,6 +547,13 @@ async fn process_request(
             cwd,
             options,
         } => start_task(id, adapter_id, prompt, cwd, options, tasks, adapters).await,
+        DaemonRequest::StartChain {
+            id,
+            prompt,
+            cwd,
+            steps,
+            note,
+        } => start_chain(id, prompt, cwd, steps, note, tasks, adapters).await,
         DaemonRequest::ContinueTask {
             id,
             prompt,
@@ -555,7 +598,8 @@ async fn process_request(
             id,
             executable,
             environment,
-        } => register_adapter(id, executable, environment, adapters).await,
+        } => register_adapter(id, executable, environment, tasks, adapters).await,
+        DaemonRequest::UnregisterAdapter { id } => unregister_adapter(id, adapters).await,
         DaemonRequest::Shutdown => DaemonResponse::ShuttingDown,
     }
 }
@@ -569,6 +613,72 @@ async fn start_task(
     tasks: SharedTaskStore,
     adapters: AdapterStore,
 ) -> DaemonResponse {
+    start_task_inner(
+        id,
+        ChainStep {
+            adapter_id,
+            options,
+        },
+        prompt,
+        cwd,
+        None,
+        tasks,
+        adapters,
+    )
+    .await
+}
+
+async fn start_chain(
+    id: Uuid,
+    prompt: String,
+    cwd: PathBuf,
+    steps: Vec<ChainStep>,
+    note: Option<String>,
+    tasks: SharedTaskStore,
+    adapters: AdapterStore,
+) -> DaemonResponse {
+    if let Some(entry) = tasks.read().await.get(&id) {
+        return DaemonResponse::Task {
+            task: entry.snapshot.clone(),
+        };
+    }
+    let context = match prepare_chain_context(id, steps, note, &adapters).await {
+        Ok(context) => context,
+        Err(message) => return error_response("invalid_chain", &message),
+    };
+    let first = context.steps[0].clone();
+    let options = match chain_step_options(&context, first.options.clone()) {
+        Ok(options) => options,
+        Err(message) => return error_response("invalid_chain", message),
+    };
+    start_task_inner(
+        id,
+        ChainStep {
+            adapter_id: first.adapter_id,
+            options,
+        },
+        prompt,
+        cwd,
+        Some(context),
+        tasks,
+        adapters,
+    )
+    .await
+}
+
+async fn start_task_inner(
+    id: Uuid,
+    step: ChainStep,
+    prompt: String,
+    cwd: PathBuf,
+    chain: Option<ChainContext>,
+    tasks: SharedTaskStore,
+    adapters: AdapterStore,
+) -> DaemonResponse {
+    let ChainStep {
+        adapter_id,
+        options,
+    } = step;
     if id.is_nil() {
         return error_response("invalid_task_id", "task ID must not be nil");
     }
@@ -644,7 +754,11 @@ async fn start_task(
     if task_entries.len() >= MAX_STORED_TASKS {
         let oldest_terminal = task_entries
             .iter()
-            .filter(|(_, entry)| entry.snapshot.status.is_terminal() && !entry.response_pending)
+            .filter(|(_, entry)| {
+                entry.snapshot.status.is_terminal()
+                    && !entry.response_pending
+                    && entry.runner.as_ref().is_none_or(JoinHandle::is_finished)
+            })
             .min_by_key(|(_, entry)| (entry.snapshot.created_at_ms, entry.snapshot.id))
             .map(|(id, _)| *id);
         let Some(oldest_terminal) = oldest_terminal else {
@@ -665,6 +779,7 @@ async fn start_task(
         cancel: Some(cancel_sender),
         runner: None,
         response_pending: false,
+        chain,
     };
     append_task_output(&mut entry, TaskOutputKind::User, prompt);
     task_entries.insert(id, entry);
@@ -721,22 +836,32 @@ async fn continue_task(
         return error_response("task_capacity", "too many tasks are currently active");
     }
     let adapter_id = existing.snapshot.adapter_id.clone();
+    let chain = existing.chain.clone();
     let Some(adapter) = adapters.read().await.get(&adapter_id).cloned() else {
         return error_response(
             "adapter_not_found",
             &format!("adapter {adapter_id} is not registered"),
         );
     };
+    let replacement_options = if options.is_empty() {
+        None
+    } else if let Some(chain) = &chain {
+        match chain_step_options(chain, options) {
+            Ok(options) => Some(options),
+            Err(message) => return error_response("invalid_adapter_options", message),
+        }
+    } else {
+        Some(options)
+    };
 
-    let now = timestamp_ms();
     let (cancel_sender, cancel_receiver) = oneshot::channel();
     let entry = task_entries.get_mut(&id).unwrap();
     entry.prompt = prompt.clone();
     entry.snapshot.status = TaskStatus::Queued;
-    entry.snapshot.updated_at_ms = now;
+    touch_task(entry);
     entry.snapshot.latest_message = Some("continuation queued".to_owned());
     entry.snapshot.turn_count = entry.snapshot.turn_count.saturating_add(1);
-    if !options.is_empty() {
+    if let Some(options) = replacement_options {
         entry.snapshot.adapter_options = options;
     }
     entry.cancel = Some(cancel_sender);
@@ -750,7 +875,7 @@ async fn continue_task(
         let mut task_entries = tasks.write().await;
         if let Some(entry) = task_entries.get_mut(&id) {
             entry.snapshot.status = TaskStatus::Failed;
-            entry.snapshot.updated_at_ms = timestamp_ms();
+            touch_task(entry);
             entry.snapshot.latest_message =
                 Some(bounded_summary(&message, MAX_STATUS_MESSAGE_BYTES));
             append_task_output(entry, TaskOutputKind::Error, message);
@@ -789,7 +914,7 @@ async fn cancel_task(id: Uuid, tasks: SharedTaskStore) -> DaemonResponse {
         let (acknowledged, acknowledgment) = oneshot::channel();
         let _ = cancel.send(CancelRequest { acknowledged });
         entry.response_pending = true;
-        entry.snapshot.updated_at_ms = timestamp_ms();
+        touch_task(entry);
         entry.snapshot.latest_message = Some("cancellation requested".to_owned());
         acknowledgment
     };
@@ -908,7 +1033,7 @@ async fn respond_to_interaction(
         }
         entry.snapshot.pending_interaction = None;
         entry.snapshot.status = TaskStatus::Running;
-        entry.snapshot.updated_at_ms = timestamp_ms();
+        touch_task(entry);
         entry.snapshot.latest_message = Some("interaction response submitted".to_owned());
         append_task_output(
             entry,
@@ -927,6 +1052,7 @@ async fn register_adapter(
     id: String,
     executable: PathBuf,
     environment: BTreeMap<String, String>,
+    tasks: SharedTaskStore,
     adapters: AdapterStore,
 ) -> DaemonResponse {
     let registration = match validate_adapter(AdapterRegistration {
@@ -942,7 +1068,16 @@ async fn register_adapter(
         .write()
         .await
         .insert(adapter_id.clone(), registration);
+    advance_pending_chains(&tasks, &adapters).await;
     DaemonResponse::AdapterRegistered { adapter_id }
+}
+
+async fn unregister_adapter(id: String, adapters: AdapterStore) -> DaemonResponse {
+    if !valid_adapter_id(&id) {
+        return error_response("invalid_adapter_id", "adapter ID is invalid");
+    }
+    adapters.write().await.remove(&id);
+    DaemonResponse::AdapterUnregistered { adapter_id: id }
 }
 
 async fn run_adapter_task(
@@ -957,6 +1092,7 @@ async fn run_adapter_task(
         .await;
     run_adapter_task_inner(id, adapter, tasks.clone(), cancel, interaction_responses).await;
     tasks.clear_interaction_responder(id).await;
+    tasks.chain_notify.notify_one();
 }
 
 async fn run_adapter_task_inner(
@@ -1372,7 +1508,7 @@ async fn apply_event(tasks: &TaskStore, event: AdapterEvent) {
     if let Some(output) = event.output {
         append_task_output(entry, output.kind, output.text);
     }
-    entry.snapshot.updated_at_ms = timestamp_ms();
+    touch_task(entry);
     if entry.snapshot.status.is_terminal() {
         entry.prompt.clear();
     }
@@ -1393,7 +1529,7 @@ async fn fail_task(tasks: &TaskStore, id: Uuid, message: String) {
     entry.snapshot.status = TaskStatus::Failed;
     entry.snapshot.pending_interaction = None;
     entry.snapshot.latest_message = Some(bounded_summary(&message, MAX_STATUS_MESSAGE_BYTES));
-    entry.snapshot.updated_at_ms = timestamp_ms();
+    touch_task(entry);
     append_task_output(entry, TaskOutputKind::Error, message);
     entry.prompt.clear();
     entry.cancel = None;
@@ -1410,7 +1546,7 @@ async fn set_canceled(tasks: &TaskStore, id: Uuid) {
     };
     entry.snapshot.status = TaskStatus::Canceled;
     entry.snapshot.pending_interaction = None;
-    entry.snapshot.updated_at_ms = timestamp_ms();
+    touch_task(entry);
     entry.snapshot.latest_message = Some("task canceled".to_owned());
     append_task_output(entry, TaskOutputKind::System, "Task canceled".to_owned());
     entry.prompt.clear();
@@ -1779,7 +1915,7 @@ fn recover_interrupted_tasks(tasks: &mut HashMap<Uuid, TaskEntry>) -> Vec<Uuid> 
         entry.snapshot.status = TaskStatus::Failed;
         entry.snapshot.pending_interaction = None;
         entry.snapshot.latest_message = Some(message.to_owned());
-        entry.snapshot.updated_at_ms = timestamp_ms();
+        touch_task(entry);
         append_task_output(entry, TaskOutputKind::Error, message.to_owned());
         entry.prompt.clear();
         entry.cancel = None;
@@ -1866,6 +2002,319 @@ fn prepare_socket_directory(socket_path: &Path) -> Result<()> {
     }
     validate_path_ancestors(parent)?;
     Ok(())
+}
+
+async fn prepare_chain_context(
+    id: Uuid,
+    steps: Vec<ChainStep>,
+    note: Option<String>,
+    adapters: &AdapterStore,
+) -> std::result::Result<ChainContext, String> {
+    if id.is_nil() {
+        return Err("chain ID must not be nil".to_owned());
+    }
+    if !(2..=MAX_CHAIN_STEPS).contains(&steps.len()) {
+        return Err(format!(
+            "a chain requires between 2 and {MAX_CHAIN_STEPS} steps"
+        ));
+    }
+    let note = note.unwrap_or_default().trim().to_owned();
+    if note.len() > MAX_CHAIN_NOTE_BYTES || note.chars().any(char::is_control) {
+        return Err("chain note is invalid".to_owned());
+    }
+    let agents = steps
+        .iter()
+        .map(|step| step.adapter_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if agents.len() > MAX_ADAPTER_OPTION_VALUE_BYTES {
+        return Err("chain adapter list is too large".to_owned());
+    }
+    let registered = adapters.read().await;
+    for step in &steps {
+        if !valid_adapter_id(&step.adapter_id) {
+            return Err(format!("chain adapter ID is invalid: {}", step.adapter_id));
+        }
+        if !registered.contains_key(&step.adapter_id) {
+            return Err(format!(
+                "chain adapter is not registered: {}",
+                step.adapter_id
+            ));
+        }
+        if step.options.keys().any(|key| is_chain_option(key)) {
+            return Err("chain metadata cannot be provided as a step option".to_owned());
+        }
+        validate_adapter_options(&step.options).map_err(str::to_owned)?;
+    }
+    let context = ChainContext {
+        id,
+        step: 0,
+        steps,
+        note,
+    };
+    for (step, planned) in context.steps.iter().enumerate() {
+        let mut candidate = context.clone();
+        candidate.step = step;
+        chain_step_options(&candidate, planned.options.clone()).map_err(str::to_owned)?;
+    }
+    Ok(context)
+}
+
+fn validate_chain_context(snapshot: &TaskSnapshot, chain: &ChainContext) -> Result<()> {
+    if chain.id.is_nil() || !(2..=MAX_CHAIN_STEPS).contains(&chain.steps.len()) {
+        bail!("persisted chain plan is invalid");
+    }
+    if chain.step >= chain.steps.len() || snapshot.adapter_id != chain.steps[chain.step].adapter_id
+    {
+        bail!("persisted chain step does not match its task");
+    }
+    if chain.note.len() > MAX_CHAIN_NOTE_BYTES || chain.note.chars().any(char::is_control) {
+        bail!("persisted chain note is invalid");
+    }
+    for step in &chain.steps {
+        if !valid_adapter_id(&step.adapter_id)
+            || step.options.keys().any(|key| is_chain_option(key))
+        {
+            bail!("persisted chain adapter is invalid");
+        }
+        validate_adapter_options(&step.options).map_err(anyhow::Error::msg)?;
+    }
+    let agents = chain
+        .steps
+        .iter()
+        .map(|step| step.adapter_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    if agents.len() > MAX_ADAPTER_OPTION_VALUE_BYTES
+        || snapshot.adapter_options.get(CHAIN_GROUP_OPTION) != Some(&chain.id.to_string())
+        || snapshot.adapter_options.get(CHAIN_STEP_OPTION) != Some(&chain.step.to_string())
+        || snapshot.adapter_options.get(CHAIN_AGENTS_OPTION) != Some(&agents)
+        || match snapshot.adapter_options.get(CHAIN_NOTE_OPTION) {
+            Some(note) => note != &chain.note || chain.note.is_empty(),
+            None => !chain.note.is_empty(),
+        }
+    {
+        bail!("persisted chain metadata is invalid");
+    }
+    Ok(())
+}
+
+fn chain_step_options(
+    chain: &ChainContext,
+    mut options: BTreeMap<String, String>,
+) -> std::result::Result<BTreeMap<String, String>, &'static str> {
+    if options.keys().any(|key| is_chain_option(key)) {
+        return Err("chain metadata cannot be provided as a step option");
+    }
+    options.insert(CHAIN_GROUP_OPTION.to_owned(), chain.id.to_string());
+    options.insert(CHAIN_STEP_OPTION.to_owned(), chain.step.to_string());
+    options.insert(
+        CHAIN_AGENTS_OPTION.to_owned(),
+        chain
+            .steps
+            .iter()
+            .map(|step| step.adapter_id.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    if !chain.note.is_empty() {
+        options.insert(CHAIN_NOTE_OPTION.to_owned(), chain.note.clone());
+    }
+    validate_adapter_options(&options)?;
+    Ok(options)
+}
+
+fn is_chain_option(key: &str) -> bool {
+    matches!(
+        key,
+        CHAIN_GROUP_OPTION | CHAIN_STEP_OPTION | CHAIN_AGENTS_OPTION | CHAIN_NOTE_OPTION
+    )
+}
+
+#[derive(Debug, Clone)]
+struct PendingChainAdvance {
+    source_id: Uuid,
+    context: ChainContext,
+    answer: String,
+    cwd: PathBuf,
+}
+
+fn pending_chain_advances(entries: &HashMap<Uuid, TaskEntry>) -> Vec<PendingChainAdvance> {
+    let mut contexts = BTreeMap::<Uuid, ChainContext>::new();
+    for entry in entries.values() {
+        let Some(chain) = &entry.chain else { continue };
+        if chain.step == 0 {
+            contexts.insert(chain.id, chain.clone());
+        } else {
+            contexts.entry(chain.id).or_insert_with(|| chain.clone());
+        }
+    }
+
+    let mut advances = Vec::new();
+    for (chain_id, context) in contexts {
+        let mut members = entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                entry
+                    .chain
+                    .as_ref()
+                    .filter(|chain| chain.id == chain_id)
+                    .map(|chain| (*id, entry, chain))
+            })
+            .collect::<Vec<_>>();
+        members.sort_by_key(|(_, _, chain)| chain.step);
+        if members.is_empty()
+            || members
+                .iter()
+                .any(|(_, _, chain)| chain.steps != context.steps || chain.note != context.note)
+            || members
+                .windows(2)
+                .any(|pair| pair[0].2.step == pair[1].2.step)
+        {
+            continue;
+        }
+        let (source_id, source, source_chain) = members.last().unwrap();
+        if source_chain.step + 1 >= context.steps.len()
+            || source.snapshot.status != TaskStatus::Completed
+        {
+            continue;
+        }
+        advances.push(PendingChainAdvance {
+            source_id: *source_id,
+            context: (*source_chain).clone(),
+            answer: last_turn_answer(&source.output),
+            cwd: source.snapshot.cwd.clone(),
+        });
+    }
+    advances.sort_by_key(|advance| advance.context.id);
+    advances
+}
+
+fn last_turn_answer(output: &[TaskOutput]) -> String {
+    let start = output
+        .iter()
+        .rposition(|item| item.kind == TaskOutputKind::User)
+        .map_or(0, |index| index + 1);
+    output[start..]
+        .iter()
+        .filter(|item| item.kind == TaskOutputKind::Assistant)
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+async fn advance_pending_chains(tasks: &SharedTaskStore, adapters: &AdapterStore) {
+    let _guard = tasks.chain_lock.lock().await;
+    let advances = {
+        let entries = tasks.read().await;
+        pending_chain_advances(&entries)
+    };
+    for advance in advances {
+        let next_step = advance.context.step + 1;
+        let next = advance.context.steps[next_step].clone();
+        if advance.answer.is_empty() {
+            update_chain_source(
+                tasks,
+                advance.source_id,
+                format!("Chain halted: step {} has no assistant answer", next_step),
+                Some(TaskOutputKind::Error),
+            )
+            .await;
+            continue;
+        }
+        if !adapters.read().await.contains_key(&next.adapter_id) {
+            update_chain_source(
+                tasks,
+                advance.source_id,
+                format!("Chain waiting for adapter {}", next.adapter_id),
+                Some(TaskOutputKind::System),
+            )
+            .await;
+            continue;
+        }
+        let mut context = advance.context;
+        context.step = next_step;
+        let options = match chain_step_options(&context, next.options) {
+            Ok(options) => options,
+            Err(message) => {
+                update_chain_source(
+                    tasks,
+                    advance.source_id,
+                    format!("Chain halted: {message}"),
+                    Some(TaskOutputKind::Error),
+                )
+                .await;
+                continue;
+            }
+        };
+        let instruction = if context.note.is_empty() {
+            "基于上一步的输出继续处理："
+        } else {
+            &context.note
+        };
+        let response = start_task_inner(
+            Uuid::new_v4(),
+            ChainStep {
+                adapter_id: next.adapter_id.clone(),
+                options,
+            },
+            format!("{instruction}\n\n{}", advance.answer),
+            advance.cwd,
+            Some(context),
+            tasks.clone(),
+            adapters.clone(),
+        )
+        .await;
+        match response {
+            DaemonResponse::Task { .. } => {
+                update_chain_source(
+                    tasks,
+                    advance.source_id,
+                    format!("Chain advanced to {}", next.adapter_id),
+                    None,
+                )
+                .await;
+            }
+            DaemonResponse::Error { code, message } => {
+                update_chain_source(
+                    tasks,
+                    advance.source_id,
+                    format!("Chain waiting: {code}: {message}"),
+                    Some(TaskOutputKind::Error),
+                )
+                .await;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn update_chain_source(
+    tasks: &SharedTaskStore,
+    id: Uuid,
+    message: String,
+    output_kind: Option<TaskOutputKind>,
+) {
+    let changed = {
+        let mut entries = tasks.write().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            return;
+        };
+        if entry.snapshot.latest_message.as_deref() == Some(message.as_str()) {
+            return;
+        }
+        entry.snapshot.latest_message = Some(message.clone());
+        touch_task(entry);
+        if let Some(kind) = output_kind {
+            append_task_output(entry, kind, message);
+        }
+        true
+    };
+    if changed && let Err(error) = tasks.persist_task(id).await {
+        eprintln!("failed to persist chain state for {id}: {error:#}");
+    }
 }
 
 fn valid_adapter_id(id: &str) -> bool {
@@ -2077,6 +2526,11 @@ fn append_task_output(entry: &mut TaskEntry, kind: TaskOutputKind, text: String)
     });
 }
 
+fn touch_task(entry: &mut TaskEntry) {
+    entry.snapshot.updated_at_ms =
+        timestamp_ms().max(entry.snapshot.updated_at_ms.saturating_add(1));
+}
+
 fn timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2195,6 +2649,7 @@ mod tests {
             cancel: None,
             runner: None,
             response_pending: false,
+            chain: None,
         };
         append_task_output(&mut entry, TaskOutputKind::User, "persist me".to_owned());
         entry
@@ -2215,13 +2670,55 @@ mod tests {
         }
     }
 
+    async fn wait_for_completed_adapter(tasks: &SharedTaskStore, adapter_id: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let completed = tasks.read().await.values().any(|entry| {
+                    entry.snapshot.adapter_id == adapter_id
+                        && entry.snapshot.status == TaskStatus::Completed
+                });
+                if completed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn completion_adapter(id: &str, executable: PathBuf, reply: &str) -> AdapterRegistration {
+        AdapterRegistration {
+            id: id.to_owned(),
+            executable,
+            environment: BTreeMap::from([("RELAY_REPLY".to_owned(), reply.to_owned())]),
+        }
+    }
+
     #[test]
     fn persisted_task_round_trips_with_private_permissions() {
         let directory = tempfile::tempdir().unwrap();
         let state_directory = directory.path().join("tasks");
         let persistence = TaskPersistence::prepare(state_directory.clone()).unwrap();
         let id = Uuid::new_v4();
-        let entry = persisted_test_entry(id, TaskStatus::Completed);
+        let mut entry = persisted_test_entry(id, TaskStatus::Completed);
+        let chain = ChainContext {
+            id,
+            step: 0,
+            steps: vec![
+                ChainStep {
+                    adapter_id: "mock".to_owned(),
+                    options: BTreeMap::new(),
+                },
+                ChainStep {
+                    adapter_id: "next".to_owned(),
+                    options: BTreeMap::new(),
+                },
+            ],
+            note: "Review:".to_owned(),
+        };
+        entry.snapshot.adapter_options = chain_step_options(&chain, BTreeMap::new()).unwrap();
+        entry.chain = Some(chain);
 
         persistence
             .write(&PersistedTask::from_entry(&entry))
@@ -2232,6 +2729,7 @@ mod tests {
         assert_eq!(restored.snapshot, entry.snapshot);
         assert_eq!(restored.output, entry.output);
         assert_eq!(restored.next_output_sequence, 1);
+        assert_eq!(restored.chain, entry.chain);
         assert_eq!(
             std::fs::metadata(state_directory.join(format!("{id}.json")))
                 .unwrap()
@@ -2293,6 +2791,36 @@ mod tests {
         let restored = restored.get(&id).unwrap();
         assert_eq!(restored.snapshot.status, TaskStatus::Completed);
         assert_eq!(restored.output.last().unwrap().text, "answer");
+    }
+
+    #[tokio::test]
+    async fn adapter_events_advance_task_time_past_the_previous_value() {
+        let id = Uuid::new_v4();
+        let mut entry = persisted_test_entry(id, TaskStatus::Running);
+        let previous = timestamp_ms().saturating_add(60_000);
+        entry.snapshot.updated_at_ms = previous;
+        let tasks = task_store(HashMap::from([(id, entry)]));
+
+        apply_event(
+            &tasks,
+            AdapterEvent {
+                task_id: id,
+                status: TaskStatus::Running,
+                message: None,
+                output: Some(relay_protocol::AdapterOutput {
+                    kind: TaskOutputKind::Assistant,
+                    text: "next output".to_owned(),
+                }),
+                session_id: None,
+                interaction: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            tasks.read().await.get(&id).unwrap().snapshot.updated_at_ms,
+            previous + 1
+        );
     }
 
     #[test]
@@ -2637,6 +3165,160 @@ mod tests {
         shutdown_tasks(&tasks).await;
     }
 
+    #[tokio::test]
+    async fn daemon_advances_a_chain_once_with_per_step_options() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = directory.path().join("complete.sh");
+        std::fs::write(
+            &adapter,
+            r#"#!/bin/sh
+IFS= read -r request
+task_id=${request#*\"task_id\":\"}
+task_id=${task_id%%\"*}
+printf '{\"task_id\":\"%s\",\"status\":\"completed\",\"message\":\"done\",\"output\":{\"kind\":\"assistant\",\"text\":\"%s\"},\"session_id\":null}\n' "$task_id" "$RELAY_REPLY"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let adapters = Arc::new(RwLock::new(HashMap::from([
+            (
+                "echo-a".to_owned(),
+                completion_adapter("echo-a", adapter.clone(), "first answer"),
+            ),
+            (
+                "echo-b".to_owned(),
+                completion_adapter("echo-b", adapter, "second answer"),
+            ),
+        ])));
+        let tasks = task_store(HashMap::new());
+        let chain_id = Uuid::new_v4();
+
+        let response = start_chain(
+            chain_id,
+            "initial request".to_owned(),
+            directory.path().to_owned(),
+            vec![
+                ChainStep {
+                    adapter_id: "echo-a".to_owned(),
+                    options: BTreeMap::from([("model".to_owned(), "alpha".to_owned())]),
+                },
+                ChainStep {
+                    adapter_id: "echo-b".to_owned(),
+                    options: BTreeMap::from([("model".to_owned(), "beta".to_owned())]),
+                },
+            ],
+            Some("Review:".to_owned()),
+            tasks.clone(),
+            adapters.clone(),
+        )
+        .await;
+
+        assert!(matches!(response, DaemonResponse::Task { .. }));
+        wait_for_completed_adapter(&tasks, "echo-a").await;
+        advance_pending_chains(&tasks, &adapters).await;
+        advance_pending_chains(&tasks, &adapters).await;
+        assert_eq!(tasks.read().await.len(), 2);
+        wait_for_completed_adapter(&tasks, "echo-b").await;
+
+        let entries = tasks.read().await;
+        let second = entries
+            .values()
+            .find(|entry| entry.snapshot.adapter_id == "echo-b")
+            .unwrap();
+        assert_eq!(
+            second
+                .output
+                .iter()
+                .find(|item| item.kind == TaskOutputKind::User)
+                .unwrap()
+                .text,
+            "Review:\n\nfirst answer"
+        );
+        assert_eq!(
+            second
+                .snapshot
+                .adapter_options
+                .get("model")
+                .map(String::as_str),
+            Some("beta")
+        );
+        assert_eq!(
+            second
+                .snapshot
+                .adapter_options
+                .get(CHAIN_STEP_OPTION)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(second.chain.as_ref().map(|chain| chain.step), Some(1));
+        drop(entries);
+        shutdown_tasks(&tasks).await;
+    }
+
+    #[tokio::test]
+    async fn chain_requires_registered_steps_and_rejects_reserved_options() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapters = adapter_store("echo-a", PathBuf::from("/usr/bin/true"));
+        let tasks = task_store(HashMap::new());
+
+        let missing = start_chain(
+            Uuid::new_v4(),
+            "test".to_owned(),
+            directory.path().to_owned(),
+            vec![
+                ChainStep {
+                    adapter_id: "echo-a".to_owned(),
+                    options: BTreeMap::new(),
+                },
+                ChainStep {
+                    adapter_id: "echo-b".to_owned(),
+                    options: BTreeMap::new(),
+                },
+            ],
+            None,
+            tasks.clone(),
+            adapters.clone(),
+        )
+        .await;
+        assert!(matches!(
+            missing,
+            DaemonResponse::Error { code, message }
+                if code == "invalid_chain" && message.contains("not registered")
+        ));
+
+        adapters.write().await.insert(
+            "echo-b".to_owned(),
+            test_adapter("echo-b", PathBuf::from("/usr/bin/true")),
+        );
+        let reserved = start_chain(
+            Uuid::new_v4(),
+            "test".to_owned(),
+            directory.path().to_owned(),
+            vec![
+                ChainStep {
+                    adapter_id: "echo-a".to_owned(),
+                    options: BTreeMap::from([(
+                        CHAIN_GROUP_OPTION.to_owned(),
+                        "spoofed".to_owned(),
+                    )]),
+                },
+                ChainStep {
+                    adapter_id: "echo-b".to_owned(),
+                    options: BTreeMap::new(),
+                },
+            ],
+            None,
+            tasks,
+            adapters,
+        )
+        .await;
+        assert!(matches!(
+            reserved,
+            DaemonResponse::Error { code, message }
+                if code == "invalid_chain" && message.contains("metadata")
+        ));
+    }
+
     #[test]
     fn output_event_truncation_is_reported() {
         let id = Uuid::new_v4();
@@ -2687,6 +3369,7 @@ mod tests {
                     cancel: None,
                     runner: None,
                     response_pending: false,
+                    chain: None,
                 },
             );
         }
@@ -2744,6 +3427,7 @@ mod tests {
                     cancel: None,
                     runner: None,
                     response_pending: id == protected_id,
+                    chain: None,
                 },
             );
         }
@@ -2849,11 +3533,13 @@ mod tests {
     #[tokio::test]
     async fn adapter_can_be_registered_while_daemon_is_running() {
         let adapters = Arc::new(RwLock::new(HashMap::new()));
+        let tasks = task_store(HashMap::new());
         let executable = std::env::current_exe().unwrap();
         let response = register_adapter(
             "dynamic".to_owned(),
             executable.clone(),
             BTreeMap::from([("RELAY_DYNAMIC_PATH".to_owned(), "/usr/bin/true".to_owned())]),
+            tasks,
             adapters.clone(),
         )
         .await;
@@ -2872,6 +3558,36 @@ mod tests {
             registered.environment.get("RELAY_DYNAMIC_PATH"),
             Some(&"/usr/bin/true".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn adapter_can_be_unregistered_without_invalidating_running_clone() {
+        let executable = std::env::current_exe().unwrap();
+        let registration = validate_adapter(AdapterRegistration {
+            id: "dynamic".to_owned(),
+            executable,
+            environment: BTreeMap::new(),
+        })
+        .unwrap();
+        let adapters = Arc::new(RwLock::new(HashMap::from([(
+            registration.id.clone(),
+            registration,
+        )])));
+        let running_clone = adapters.read().await.get("dynamic").unwrap().clone();
+
+        let response = unregister_adapter("dynamic".to_owned(), adapters.clone()).await;
+
+        assert!(matches!(
+            response,
+            DaemonResponse::AdapterUnregistered { adapter_id } if adapter_id == "dynamic"
+        ));
+        assert!(!adapters.read().await.contains_key("dynamic"));
+        assert_eq!(running_clone.id, "dynamic");
+
+        assert!(matches!(
+            unregister_adapter("dynamic".to_owned(), adapters).await,
+            DaemonResponse::AdapterUnregistered { adapter_id } if adapter_id == "dynamic"
+        ));
     }
 
     #[tokio::test]
@@ -2904,6 +3620,7 @@ mod tests {
                 cancel: Some(cancel_sender),
                 runner: None,
                 response_pending: false,
+                chain: None,
             },
         )]));
 
@@ -2958,6 +3675,7 @@ mod tests {
                 cancel: None,
                 runner: None,
                 response_pending: false,
+                chain: None,
             },
         )]));
         let (acknowledged, _acknowledgment) = oneshot::channel();
@@ -3046,6 +3764,7 @@ mod tests {
                 cancel: Some(cancel_sender),
                 runner: None,
                 response_pending: false,
+                chain: None,
             },
         )]));
         let runner_tasks = tasks.clone();
@@ -3117,9 +3836,12 @@ mod tests {
         .await
         .unwrap();
 
-        tokio::time::timeout(std::time::Duration::from_secs(2), shutdown_tasks(&tasks))
-            .await
-            .unwrap();
+        tokio::time::timeout(
+            PROCESS_GROUP_EXIT_TIMEOUT + std::time::Duration::from_secs(1),
+            shutdown_tasks(&tasks),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             tasks.read().await.get(&task.id).unwrap().snapshot.status,
@@ -3160,6 +3882,7 @@ mod tests {
                 cancel: None,
                 runner: None,
                 response_pending: false,
+                chain: None,
             },
         )]));
         let adapters = adapter_store("mock", PathBuf::from("/usr/bin/true"));
@@ -3226,6 +3949,7 @@ mod tests {
             cancel: None,
             runner: None,
             response_pending: false,
+            chain: None,
         };
         append_task_output(&mut entry, TaskOutputKind::User, "question".to_owned());
         append_task_output(&mut entry, TaskOutputKind::Assistant, "answer".to_owned());

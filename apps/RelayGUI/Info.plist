@@ -2,31 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDisplayName</key>
-    <string>Relay</string>
-    <key>CFBundleExecutable</key>
-    <string>RelayGUI</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.tenishin.relay</string>
-    <key>CFBundleName</key>
-    <string>Relay</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-	<string>0.8.2</string>
-    <key>CFBundleVersion</key>
-	<string>10</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>Relay needs access to run your selected CLI agents in projects on the Desktop.</string>
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>Relay needs access to run your selected CLI agents in projects in Documents.</string>
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>Relay needs access to run your selected CLI agents in projects in Downloads.</string>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
+	<key>CFBundleDisplayName</key>
+	<string>Relay</string>
+	<key>CFBundleExecutable</key>
+	<string>RelayGUI</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.tenishin.relay</string>
+	<key>CFBundleName</key>
+	<string>Relay</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.20.0</string>
+	<key>CFBundleVersion</key>
+	<string>32</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Relay needs access to run your selected CLI agents in projects on the Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Relay needs access to run your selected CLI agents in projects in Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Relay needs access to run your selected CLI agents in projects in Downloads.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
 </dict>
 </plist>

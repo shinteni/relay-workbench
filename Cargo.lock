@@ -124,10 +124,11 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli-adapters"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "relay-protocol",
+ "serde",
  "serde_json",
 ]
 
@@ -298,7 +299,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "relay-protocol"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -307,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "relayd"
-version = "0.6.0"
+version = "0.9.3"
 dependencies = [
  "anyhow",
  "clap",

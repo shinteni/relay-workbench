@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
-use relay_protocol::{AdapterInteractionResponse, DaemonRequest, DaemonResponse, MAX_PROMPT_BYTES};
+use relay_protocol::{
+    AdapterInteractionResponse, ChainStep, DaemonRequest, DaemonResponse, MAX_CHAIN_STEPS,
+    MAX_PROMPT_BYTES,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
@@ -34,6 +37,22 @@ enum ClientCommand {
         #[arg(long = "option", value_name = "KEY=VALUE")]
         options: Vec<String>,
     },
+    StartChain {
+        #[arg(long)]
+        id: Option<Uuid>,
+        #[arg(long = "step", value_name = "ADAPTER")]
+        steps: Vec<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "prompt")]
+        stdin: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long = "step-option", value_name = "STEP:KEY=VALUE")]
+        step_options: Vec<String>,
+    },
     Get {
         id: Uuid,
     },
@@ -50,6 +69,12 @@ enum ClientCommand {
         id: Uuid,
     },
     List,
+    Watch {
+        #[arg(long, default_value_t = 1_000)]
+        interval_ms: u64,
+        #[arg(long)]
+        parent_pid: Option<u32>,
+    },
     Cancel {
         id: Uuid,
     },
@@ -80,6 +105,10 @@ enum ClientCommand {
         #[arg(long = "environment", value_name = "KEY=VALUE")]
         environment: Vec<String>,
     },
+    UnregisterAdapter {
+        #[arg(long)]
+        id: String,
+    },
     Shutdown,
 }
 
@@ -99,6 +128,12 @@ async fn run() -> Result<bool> {
     let arguments = Arguments::parse();
     let (request, start_id) = match arguments.command {
         ClientCommand::Ping => (DaemonRequest::Ping, None),
+        ClientCommand::Watch {
+            interval_ms,
+            parent_pid,
+        } => {
+            return watch_tasks(&arguments.socket, interval_ms, parent_pid).await;
+        }
         ClientCommand::Start {
             id,
             adapter,
@@ -120,6 +155,45 @@ async fn run() -> Result<bool> {
                     prompt,
                     cwd,
                     options: parse_key_values(options, "adapter option")?,
+                },
+                Some(id),
+            )
+        }
+        ClientCommand::StartChain {
+            id,
+            steps,
+            prompt,
+            stdin,
+            cwd,
+            note,
+            step_options,
+        } => {
+            if !(2..=MAX_CHAIN_STEPS).contains(&steps.len()) {
+                return Err(anyhow!(
+                    "a chain requires between 2 and {MAX_CHAIN_STEPS} --step values"
+                ));
+            }
+            let options = parse_step_options(step_options, steps.len())?;
+            let id = id.unwrap_or_else(Uuid::new_v4);
+            let prompt = prompt_input(stdin, prompt, std::io::stdin().lock())?;
+            let cwd = cwd
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)
+                .context("failed to resolve cwd")?;
+            (
+                DaemonRequest::StartChain {
+                    id,
+                    prompt,
+                    cwd,
+                    steps: steps
+                        .into_iter()
+                        .zip(options)
+                        .map(|(adapter_id, options)| ChainStep {
+                            adapter_id,
+                            options,
+                        })
+                        .collect(),
+                    note,
                 },
                 Some(id),
             )
@@ -171,6 +245,7 @@ async fn run() -> Result<bool> {
             },
             None,
         ),
+        ClientCommand::UnregisterAdapter { id } => (DaemonRequest::UnregisterAdapter { id }, None),
         ClientCommand::Shutdown => (DaemonRequest::Shutdown, None),
     };
     let response = relayd::send_request(&arguments.socket, &request)
@@ -188,6 +263,52 @@ async fn run() -> Result<bool> {
     Ok(!matches!(response, DaemonResponse::Error { .. }))
 }
 
+async fn watch_tasks(
+    socket: &std::path::Path,
+    interval_ms: u64,
+    parent_pid: Option<u32>,
+) -> Result<bool> {
+    if !(100..=60_000).contains(&interval_ms) {
+        return Err(anyhow!(
+            "watch interval must be between 100 and 60000 milliseconds"
+        ));
+    }
+    let mut previous = None;
+    loop {
+        if !watch_parent_matches(parent_pid) {
+            return Ok(true);
+        }
+        let response = relayd::send_request(socket, &DaemonRequest::ListTasks).await?;
+        if let Some(line) = changed_response_line(&response, &mut previous)? {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(line.as_bytes())?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+    }
+}
+
+fn watch_parent_matches(expected: Option<u32>) -> bool {
+    match expected {
+        None => true,
+        Some(0) => false,
+        Some(expected) => (unsafe { libc::getppid() }) as u32 == expected,
+    }
+}
+
+fn changed_response_line(
+    response: &DaemonResponse,
+    previous: &mut Option<String>,
+) -> Result<Option<String>> {
+    let line = serde_json::to_string(response).context("failed to encode watch response")?;
+    if previous.as_ref() == Some(&line) {
+        return Ok(None);
+    }
+    *previous = Some(line.clone());
+    Ok(Some(line))
+}
+
 fn parse_key_values(values: Vec<String>, kind: &str) -> Result<BTreeMap<String, String>> {
     let mut options = BTreeMap::new();
     for value in values {
@@ -199,6 +320,34 @@ fn parse_key_values(values: Vec<String>, kind: &str) -> Result<BTreeMap<String, 
         }
         if options.insert(key.to_owned(), value.to_owned()).is_some() {
             return Err(anyhow!("{kind} {key} was provided more than once"));
+        }
+    }
+    Ok(options)
+}
+
+fn parse_step_options(
+    values: Vec<String>,
+    step_count: usize,
+) -> Result<Vec<BTreeMap<String, String>>> {
+    let mut options = vec![BTreeMap::new(); step_count];
+    for value in values {
+        let (step, option) = value
+            .split_once(':')
+            .with_context(|| format!("step option must use STEP:KEY=VALUE: {value}"))?;
+        let step = step
+            .parse::<usize>()
+            .with_context(|| format!("step option index is invalid: {step}"))?;
+        if step == 0 || step > step_count {
+            return Err(anyhow!(
+                "step option index must be between 1 and {step_count}"
+            ));
+        }
+        let parsed = parse_key_values(vec![option.to_owned()], "step option")?;
+        let (key, value) = parsed.into_iter().next().unwrap();
+        if options[step - 1].insert(key.clone(), value).is_some() {
+            return Err(anyhow!(
+                "step option {key} was provided more than once for step {step}"
+            ));
         }
     }
     Ok(options)
@@ -291,6 +440,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_one_based_chain_step_options() {
+        assert_eq!(
+            parse_step_options(
+                vec!["1:codex_mode=plan".to_owned(), "2:model=opus".to_owned(),],
+                2,
+            )
+            .unwrap(),
+            vec![
+                BTreeMap::from([("codex_mode".to_owned(), "plan".to_owned())]),
+                BTreeMap::from([("model".to_owned(), "opus".to_owned())]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_chain_step_options_outside_the_plan() {
+        assert!(parse_step_options(vec!["3:model=opus".to_owned()], 2).is_err());
+        assert!(parse_step_options(vec!["0:model=opus".to_owned()], 2).is_err());
+    }
+
+    #[test]
+    fn watch_output_is_emitted_only_when_tasks_change() {
+        let first = DaemonResponse::Tasks { tasks: Vec::new() };
+        let mut previous = None;
+
+        assert!(
+            changed_response_line(&first, &mut previous)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(changed_response_line(&first, &mut previous).unwrap(), None);
+
+        let changed = DaemonResponse::Error {
+            code: "changed".to_owned(),
+            message: "changed".to_owned(),
+        };
+        assert!(
+            changed_response_line(&changed, &mut previous)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn watch_parent_guard_accepts_only_the_current_parent() {
+        let parent_pid = unsafe { libc::getppid() };
+        assert!(parent_pid > 0);
+        assert!(watch_parent_matches(None));
+        assert!(watch_parent_matches(Some(parent_pid as u32)));
+        assert!(!watch_parent_matches(Some(0)));
     }
 
     #[test]

@@ -9,7 +9,10 @@ let package = Package(
         .executable(name: "RelayGUI", targets: ["RelayGUI"]),
     ],
     targets: [
-        .executableTarget(name: "RelayGUI"),
+        .executableTarget(
+            name: "RelayGUI",
+            resources: [.copy("Resources/protocol-version.txt")]
+        ),
         .testTarget(name: "RelayGUITests", dependencies: ["RelayGUI"]),
     ],
     swiftLanguageModes: [.v5]

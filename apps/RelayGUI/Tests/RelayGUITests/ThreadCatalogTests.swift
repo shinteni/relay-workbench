@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import RelayGUI
 
@@ -62,15 +63,65 @@ struct ThreadCatalogTests {
         #expect(ThreadCatalog.activity(tasks, agentID: "mix") == RelayAgentActivity(active: 0, waiting: 0))
     }
 
+    @Test
+    func compareMembersAreScopedToGroupAndOrderedByAgent() {
+        let tasks = [
+            task(id: "9", title: nil, prompt: "other", adapter: "codex", cwd: "/tmp"),
+            task(id: "2", title: nil, prompt: "same", adapter: "ollama", cwd: "/tmp", group: "g1"),
+            task(id: "1", title: nil, prompt: "same", adapter: "claude", cwd: "/tmp", group: "g1"),
+            task(id: "3", title: nil, prompt: "same", adapter: "codex", cwd: "/tmp", group: "g2"),
+        ]
+
+        let members = ThreadCatalog.compareMembers(tasks, group: "g1")
+
+        #expect(members.map(\.id) == ["1", "2"])
+        #expect(members.map(\.adapterID) == ["claude", "ollama"])
+        #expect(tasks[1].compareGroup == "g1")
+        #expect(tasks[0].compareGroup == nil)
+    }
+
+    @Test
+    func parsesExplicitHandoffAndRejectsUnknownAgent() {
+        let agents = [agent(id: "codex"), agent(id: "claude")]
+
+        let handoff = ThreadCatalog.parseHandoff(
+            "@CLAUDE verify the implementation",
+            agents: agents
+        )
+
+        #expect(handoff?.agentID == "claude")
+        #expect(handoff?.instruction == "verify the implementation")
+        #expect(ThreadCatalog.parseHandoff("@unknown continue", agents: agents) == nil)
+        #expect(ThreadCatalog.parseHandoff("continue normally", agents: agents) == nil)
+    }
+
+    @Test
+    func handoffTranscriptRespectsUTF8ByteLimit() {
+        let transcript = ThreadCatalog.transcriptText([
+            output(sequence: 0, kind: .user, text: "旧指示"),
+            output(sequence: 1, kind: .assistant, text: "日本語の回答です"),
+        ], limitBytes: 18)
+
+        #expect(transcript.hasPrefix("…"))
+        #expect(transcript.utf8.count <= 18)
+        #expect(String(data: Data(transcript.utf8), encoding: .utf8) == transcript)
+    }
+
     private func task(
         id: String,
         title: String?,
         prompt: String,
         adapter: String,
         cwd: String,
-        status: RelayTaskStatus = .completed
+        status: RelayTaskStatus = .completed,
+        group: String? = nil,
+        options: [String: String] = [:]
     ) -> RelayTask {
-        RelayTask(
+        var adapterOptions = options
+        if let group {
+            adapterOptions["relay_group"] = group
+        }
+        return RelayTask(
             id: id,
             adapterID: adapter,
             promptPreview: prompt,
@@ -83,7 +134,34 @@ struct ThreadCatalogTests {
             latestMessage: nil,
             sessionID: nil,
             turnCount: 1,
-            adapterOptions: [:]
+            adapterOptions: adapterOptions
+        )
+    }
+
+    private func output(sequence: UInt64, kind: RelayOutputKind, text: String) -> RelayTaskOutput {
+        RelayTaskOutput(
+            sequence: sequence,
+            timestampMilliseconds: sequence,
+            kind: kind,
+            text: text
+        )
+    }
+
+    private func agent(id: String) -> RelayAgent {
+        RelayAgent(
+            id: id,
+            name: id.capitalized,
+            detail: "Test agent",
+            manifestURL: URL(fileURLWithPath: "/tmp/\(id).json"),
+            adapterExecutablePath: "/bin/true",
+            usesGenericRuntime: false,
+            registrationEnvironment: [:],
+            capabilities: [],
+            versionExecutablePath: nil,
+            versionArguments: [],
+            options: [],
+            version: nil,
+            health: .ready
         )
     }
 }

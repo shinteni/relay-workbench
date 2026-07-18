@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "ollama",
+  "name": "Ollama",
+  "detail": "Local models via Ollama",
+  "capabilities": [],
+  "options": [
+    {
+      "key": "model",
+      "label": "MODEL",
+      "values": ["gemma4:latest", "gemma4:e4b"],
+      "default": "gemma4:latest"
+    }
+  ],
+  "generic": {
+    "command": "RELAY_OLLAMA_PATH",
+    "arguments": ["run", "{option:model}", "--hidethinking"]
+  },
+  "requirements": [
+    {
+      "name": "Ollama CLI",
+      "environment": "RELAY_OLLAMA_PATH",
+      "candidates": [
+        "/usr/local/bin/ollama",
+        "/opt/homebrew/bin/ollama",
+        "~/.local/bin/ollama"
+      ],
+      "version_arguments": ["--version"]
+    }
+  ]
+}
