@@ -26,6 +26,8 @@ final class RelayCompareRun: ObservableObject, Identifiable {
 
     private weak var relay: RelayService?
     private var engine: Task<Void, Never>?
+    private var relayCWD: String?
+    private(set) var groupID: String?
 
     init(relay: RelayService?, preselected: [String]) {
         self.relay = relay
@@ -92,9 +94,58 @@ final class RelayCompareRun: ObservableObject, Identifiable {
         }
     }
 
+
+    /// Structured answers as confluence snapshots (bridge to arbitration).
+    func resultSnapshots() -> [RelayResultSnapshot] {
+        members.compactMap { member in
+            let answer = ThreadCatalog.lastTurnAnswer(outputs[member.id] ?? [])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !answer.isEmpty else { return nil }
+            return RelayResultSnapshot(
+                id: UUID(),
+                agentName: member.agentName,
+                projectName: RelayTerminalContext.projectName(
+                    RelayTerminalLauncher.resolvedWorkingDirectory(
+                        relayCWD ?? FileManager.default.homeDirectoryForCurrentUser.path
+                    )
+                ),
+                text: answer
+            )
+        }
+    }
+
+    /// Re-mounts a window onto an existing daemon compare group
+    /// (e.g. after a GUI restart). Watching resumes; nothing is re-sent.
+    static func attached(
+        relay: RelayService, group: String, tasks: [RelayTask]
+    ) -> RelayCompareRun {
+        let run = RelayCompareRun(relay: relay, preselected: [])
+        run.groupID = group
+        run.relayCWD = tasks.first?.cwd
+        run.members = tasks.map { task in
+            Member(
+                id: task.id,
+                agentID: task.adapterID,
+                agentName: relay.agents.first { $0.id == task.adapterID }?.name
+                    ?? task.adapterID
+            )
+        }
+        run.phase = .running
+        relay.pinOutputs(run.members.map(\.id))
+        run.engine = Task { [weak run] in
+            guard let run, let relay = run.relay else { return }
+            await run.watch(relay: relay)
+            guard !Task.isCancelled else { return }
+            if case .running = run.phase { run.phase = .completed }
+        }
+        return run
+    }
+
     private func run(chosen: [RelayAgent], prompt: String) async {
         guard let relay else { return }
+        relayCWD = relay.workingDirectory
         let group = UUID().uuidString.lowercased()
+        groupID = group
         var created: [Member] = []
         var startFailure: String?
         for agent in chosen {
@@ -181,7 +232,7 @@ final class RelayChainRun: ObservableObject, Identifiable {
 
     private weak var relay: RelayService?
     private var engine: Task<Void, Never>?
-    private var chainID: String?
+    private(set) var chainID: String?
     private var pinned: Set<String> = []
 
     init(relay: RelayService?, preselected: [String]) {
@@ -260,6 +311,110 @@ final class RelayChainRun: ObservableObject, Identifiable {
         case .failed(let message):
             "\(copy.text("Failed:")) \(message)"
         }
+    }
+
+    /// Whether every step keeps a resumable session (follow-up rounds need it).
+    var canFollowUp: Bool {
+        guard let relay, let chainID else { return false }
+        let members = relay.tasks.filter { $0.compareGroup == chainID }
+        return !members.isEmpty && members.allSatisfy { $0.sessionID != nil }
+    }
+
+    /// Runs one more relay round through the same sequence: your new message
+    /// goes to step 1, each later step receives the previous step's answer.
+    /// Sessions are continued, so every step keeps its own memory.
+    func continueRound(prompt: String) {
+        guard case .completed = phase, let relay, let chainID else { return }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, canFollowUp else { return }
+        let ordered = relay.tasks
+            .filter { $0.compareGroup == chainID }
+            .sorted { ($0.chainStep ?? 0) < ($1.chainStep ?? 0) }
+            .map(\.id)
+        phase = .running
+        engine = Task { [weak self] in
+            await self?.relayRound(memberIDs: ordered, userPrompt: trimmed)
+        }
+    }
+
+    private func relayRound(memberIDs: [String], userPrompt: String) async {
+        guard let relay else { return }
+        let copy = RelayCopy(language: relay.language)
+        var previousAnswer: String?
+        for (index, taskID) in memberIDs.enumerated() {
+            if Task.isCancelled { return }
+            let stepPrompt: String
+            if index == 0 {
+                stepPrompt = userPrompt
+            } else {
+                let note = note.trimmingCharacters(in: .whitespacesAndNewlines)
+                stepPrompt = (note.isEmpty ? "" : note + "\n")
+                    + "基于上一步的输出继续处理：\n\n" + (previousAnswer ?? "")
+            }
+            do {
+                let previousTurns = relay.taskSnapshot(taskID)?.turnCount ?? 0
+                try await relay.continueDialogueTask(taskID: taskID, prompt: stepPrompt)
+                while true {
+                    try Task.checkCancellation()
+                    try await Task.sleep(nanoseconds: 700_000_000)
+                    guard let snapshot = relay.taskSnapshot(taskID) else { continue }
+                    if snapshot.pendingInteraction != nil {
+                        approvalWaiting.insert(taskID)
+                    } else {
+                        approvalWaiting.remove(taskID)
+                    }
+                    steps = steps.map { step in
+                        var step = step
+                        if step.id == taskID { step.status = snapshot.status }
+                        return step
+                    }
+                    await relay.refreshMemberOutput(taskID: taskID)
+                    outputs[taskID] = relay.groupOutputs[taskID] ?? []
+                    guard snapshot.status.isTerminal else { continue }
+                    if snapshot.status == .completed {
+                        if snapshot.turnCount > previousTurns { break }
+                        continue
+                    }
+                    phase = .failed(
+                        snapshot.latestMessage ?? copy.text("The turn failed.")
+                    )
+                    return
+                }
+                let answer = ThreadCatalog.lastTurnAnswer(
+                    relay.groupOutputs[taskID] ?? []
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !answer.isEmpty else {
+                    phase = .failed(copy.text("The agent returned no text answer."))
+                    return
+                }
+                previousAnswer = answer
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                phase = .failed(error.localizedDescription)
+                return
+            }
+        }
+        phase = .completed
+    }
+
+    /// Re-mounts a window onto an existing daemon chain
+    /// (daemon keeps scheduling it; the window is an observer).
+    static func attached(
+        relay: RelayService, chain: String, tasks: [RelayTask]
+    ) -> RelayChainRun {
+        let sequence = tasks.first?.chainAgents
+            ?? tasks.sorted { ($0.chainStep ?? 0) < ($1.chainStep ?? 0) }
+                .map(\.adapterID)
+        let run = RelayChainRun(relay: relay, preselected: sequence)
+        run.chainID = chain
+        run.phase = .running
+        run.engine = Task { [weak run] in
+            guard let run, let relay = run.relay else { return }
+            await run.watch(relay: relay)
+        }
+        return run
     }
 
     private func watch(relay: RelayService) async {
@@ -399,6 +554,23 @@ struct RelayCompareWindow: View {
                     run.stop()
                 }
                 .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
+            } else if case .completed = run.phase {
+                Button(copy.text("ARBITRATE RESULTS")) {
+                    store.presentResultConfluence(snapshots: run.resultSnapshots())
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix, prominent: true))
+                .disabled(run.resultSnapshots().count < 2)
+                .help(copy.text("Freeze these answers and pick one CLI to arbitrate them"))
+                Button(copy.text("FORK TO TERMINALS")) {
+                    store.beginContextRelay(
+                        results: run.resultSnapshots(),
+                        sourceName: copy.text("COMPARE"),
+                        sourceWindowID: run.id
+                    )
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+                .disabled(run.resultSnapshots().isEmpty)
+                .help(copy.text("Fill these answers into live CLI terminals"))
             }
         } content: {
             if case .setup = run.phase {
@@ -554,6 +726,7 @@ struct RelayChainWindow: View {
     let frame: CGRect
     let canvasSize: CGSize
     let focused: Bool
+    @State private var followUpDraft = ""
     @Environment(\.relayLanguage) private var language
 
     private var copy: RelayCopy { RelayCopy(language: language) }
@@ -721,7 +894,52 @@ struct RelayChainWindow: View {
                 .foregroundStyle(statusColor)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
+            if case .completed = run.phase {
+                followUpBar
+            }
         }
+    }
+
+    @ViewBuilder private var followUpBar: some View {
+        if run.canFollowUp {
+            HStack(spacing: 8) {
+                Text("›")
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                TextField(
+                    copy.text("Continue the relay with a new message…"),
+                    text: $followUpDraft,
+                    axis: .vertical
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(1...4)
+                .onSubmit(sendFollowUp)
+                Button(copy.text("SEND")) {
+                    sendFollowUp()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.warning, prominent: true))
+                .disabled(
+                    followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(RelayPalette.raised.opacity(0.55))
+        } else {
+            Text(copy.text("A step has no resumable session — follow-up rounds are unavailable."))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(RelayPalette.muted)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+        }
+    }
+
+    private func sendFollowUp() {
+        let text = followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        followUpDraft = ""
+        run.continueRound(prompt: text)
     }
 
     private var statusColor: SwiftUI.Color {

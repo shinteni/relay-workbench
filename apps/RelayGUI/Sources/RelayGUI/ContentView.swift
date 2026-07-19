@@ -314,9 +314,51 @@ struct ContentView: View {
         guard let first = pair.first else { return }
         terminals.openDialogue(RelayDialogueRun(
             relay: relay,
-            agentAID: first,
-            agentBID: pair.count > 1 ? pair[1] : first
+            participants: pair.count > 1 ? pair : [first, first]
         ))
+    }
+
+
+    /// Daemon compare/chain groups not currently mounted as windows.
+    private var unmountedGroups: [(id: String, isChain: Bool, tasks: [RelayTask])] {
+        let mountedChains = Set(terminals.chains.compactMap(\.chainID))
+        let mountedCompares = Set(terminals.compares.compactMap(\.groupID))
+        let grouped = Dictionary(
+            grouping: relay.tasks.filter { $0.compareGroup != nil }
+        ) { $0.compareGroup ?? "" }
+        return grouped.compactMap { key, tasks in
+            guard !key.isEmpty,
+                  !mountedChains.contains(key),
+                  !mountedCompares.contains(key) else { return nil }
+            let isChain = tasks.contains { $0.chainStep != nil }
+            let ordered = tasks.sorted { ($0.chainStep ?? 0) < ($1.chainStep ?? 0) }
+            return (key, isChain, ordered)
+        }
+        .sorted {
+            ($0.tasks.map(\.updatedAtMilliseconds).max() ?? 0)
+                > ($1.tasks.map(\.updatedAtMilliseconds).max() ?? 0)
+        }
+    }
+
+    private func remountGroup(_ group: (id: String, isChain: Bool, tasks: [RelayTask])) {
+        if group.isChain {
+            terminals.openChain(RelayChainRun.attached(
+                relay: relay, chain: group.id, tasks: group.tasks
+            ))
+        } else {
+            terminals.openCompare(RelayCompareRun.attached(
+                relay: relay, group: group.id, tasks: group.tasks
+            ))
+        }
+    }
+
+    private func groupLabel(_ group: (id: String, isChain: Bool, tasks: [RelayTask])) -> String {
+        let glyph = group.isChain ? "›" : "⋈"
+        let agents = group.tasks
+            .map { $0.adapterID.uppercased() }
+            .joined(separator: group.isChain ? " › " : " · ")
+        let active = group.tasks.contains { !$0.status.isTerminal }
+        return "\(glyph) \(agents)\(active ? " ●" : "")"
     }
 
     /// First-class entry points for the app's namesake linking features.
@@ -563,6 +605,23 @@ struct ContentView: View {
                     }
                     .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
                     .help(copy.text("Restore the previous CLI desk"))
+                }
+                if !unmountedGroups.isEmpty {
+                    Menu {
+                        ForEach(unmountedGroups, id: \.id) { group in
+                            Button(groupLabel(group)) {
+                                remountGroup(group)
+                            }
+                        }
+                    } label: {
+                        Text("↺")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                    .help(copy.text("Remount daemon compare/chain groups as windows"))
                 }
                 if terminals.zOrder.count > 1 {
                     Button(copy.text("TILE")) {

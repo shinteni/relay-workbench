@@ -582,6 +582,26 @@ struct RelayCopy {
         "Terminal limit reached (4)": "最多同时开 4 个终端",
         "Drag to move": "拖动标题栏移动窗口，双击最大化",
         "Toggle maximize": "最大化 / 还原",
+        "Freeze these answers and pick one CLI to arbitrate them":
+            "冻结这些结构化回答，进入汇流面板选一个 CLI 裁决并可封存入决策库",
+        "Need at least two non-empty results to arbitrate.": "至少需要两个非空结果才能汇流裁决。",
+        "Remount daemon compare/chain groups as windows": "把 daemon 里的对比/串联任务组重新挂载为窗口（关 GUI 后仍在推进的链也能找回）",
+        "No arbiter yet — open an agent's CLI terminal from the left sidebar and let it reach its input prompt.": "还没有可用的裁判——先在左侧点一个智能体打开它的 CLI 终端，等它停在输入框",
+        "Continue the relay with a new message…": "继续接力：输入新一轮指令，依次经过同一条链…",
+        "SEND": "发送",
+        "A step has no resumable session — follow-up rounds are unavailable.":
+            "有步骤没有可续会话（如 Ollama），无法追加轮次。",
+        "You are in a multi-round roundtable with other AI agents (⟨OTHERS⟩).":
+            "你正在与另外几位 AI 智能体（⟨OTHERS⟩）进行多轮圆桌对话。",
+        "Since your last turn, the others said:": "在你上一轮之后，其他参与者说：",
+        "PARTICIPANT": "参与者",
+        "Pick 2–4 agents and a topic": "选择 2–4 个智能体并输入主题",
+        "Add 2–4 participants in speaking order": "按发言顺序添加 2–4 个参与者",
+        "Everyone keeps their own session; turns go around the table.":
+            "每位参与者保有自己的会话记忆，发言按座次轮转。",
+        "FORK TO TERMINALS": "分叉给终端",
+        "Fill these answers into live CLI terminals":
+            "把这些干净回答一次性填入 1–3 个开着的 CLI 终端（只填入，不执行）",
         "EVIDENCE TIMELINE": "证据时间线",
         "CHECKPOINT": "检查点",
         "ACTIONS": "行动",
@@ -1239,6 +1259,26 @@ struct RelayCopy {
         "Terminal limit reached (4)": "ターミナルは同時に 4 つまで",
         "Drag to move": "タイトルバーをドラッグして移動、ダブルクリックで最大化",
         "Toggle maximize": "最大化 / 元に戻す",
+        "Freeze these answers and pick one CLI to arbitrate them":
+            "これらの回答を凍結し、合流パネルで仲裁 CLI を選択（決定ライブラリへ保存可）",
+        "Need at least two non-empty results to arbitrate.": "仲裁には空でない結果が 2 つ以上必要です。",
+        "Remount daemon compare/chain groups as windows": "daemon の比較/チェーン グループをウィンドウとして再マウント",
+        "No arbiter yet — open an agent's CLI terminal from the left sidebar and let it reach its input prompt.": "審判がいません——左のサイドバーからエージェントの CLI ターミナルを開き、入力プロンプトで待機させてください",
+        "Continue the relay with a new message…": "新しい指示でリレーを続行…",
+        "SEND": "送信",
+        "A step has no resumable session — follow-up rounds are unavailable.":
+            "再開できないセッションのステップがあるため、追加ラウンドは利用できません。",
+        "You are in a multi-round roundtable with other AI agents (⟨OTHERS⟩).":
+            "あなたは他の AI エージェント（⟨OTHERS⟩）と複数ラウンドの円卓対話をしています。",
+        "Since your last turn, the others said:": "あなたの前回の発言以降、他の参加者の発言：",
+        "PARTICIPANT": "参加者",
+        "Pick 2–4 agents and a topic": "エージェント 2〜4 とテーマを選択",
+        "Add 2–4 participants in speaking order": "発言順に参加者を 2〜4 追加",
+        "Everyone keeps their own session; turns go around the table.":
+            "各参加者がセッションを保持し、発言は順番に回ります。",
+        "FORK TO TERMINALS": "ターミナルへフォーク",
+        "Fill these answers into live CLI terminals":
+            "これらの回答を稼働中の CLI ターミナルへ填入します（実行はしません）",
         "EVIDENCE TIMELINE": "証拠タイムライン",
         "CHECKPOINT": "チェックポイント",
         "ACTIONS": "アクション",

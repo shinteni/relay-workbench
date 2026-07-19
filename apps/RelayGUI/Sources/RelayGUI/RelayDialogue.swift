@@ -1,40 +1,50 @@
 import SwiftUI
 
-/// Builds the localized prompts that relay one agent's answer to the other.
+/// Builds the localized prompts that relay the table's recent messages to
+/// the next speaker.
 enum RelayDialogueScript {
     /// - Parameters:
-    ///   - turn: 0-based global turn index (A speaks on even turns).
-    ///   - includesContext: whether the dialogue framing and topic must be
-    ///     restated (first exposure of this thread, or a sessionless agent
-    ///     whose thread cannot carry memory between turns).
-    static func prompt(
-        turn: Int,
-        totalTurns: Int,
+    ///   - speakerHasSpoken: whether this participant already made a statement.
+    ///   - isFinalRound: the table's last round — ask for a wrap-up.
+    ///   - includesContext: restate framing and topic (first exposure of this
+    ///     thread, or a sessionless agent that cannot carry memory).
+    static func roundtablePrompt(
+        speakerHasSpoken: Bool,
+        isFinalRound: Bool,
         topic: String,
-        otherName: String,
-        previousAnswer: String?,
+        otherNames: [String],
+        recent: [(name: String, text: String)],
         includesContext: Bool,
         copy: RelayCopy
     ) -> String {
         var lines: [String] = []
         if includesContext {
-            lines.append(
-                copy.text("You are in a multi-round dialogue with another AI agent (⟨OTHER⟩).")
-                    .replacingOccurrences(of: "⟨OTHER⟩", with: otherName)
-            )
+            if otherNames.count == 1 {
+                lines.append(
+                    copy.text("You are in a multi-round dialogue with another AI agent (⟨OTHER⟩).")
+                        .replacingOccurrences(of: "⟨OTHER⟩", with: otherNames[0])
+                )
+            } else {
+                lines.append(
+                    copy.text("You are in a multi-round roundtable with other AI agents (⟨OTHERS⟩).")
+                        .replacingOccurrences(
+                            of: "⟨OTHERS⟩",
+                            with: otherNames.joined(separator: " / ")
+                        )
+                )
+            }
             lines.append("\(copy.text("Topic:")) \(topic)")
         }
-        if let previousAnswer {
+        if !recent.isEmpty {
+            lines.append(copy.text("Since your last turn, the others said:"))
             lines.append(
-                copy.text("The other agent (⟨OTHER⟩) said:")
-                    .replacingOccurrences(of: "⟨OTHER⟩", with: otherName)
+                recent.map { "【\($0.name)】\n\($0.text)" }.joined(separator: "\n\n")
             )
-            lines.append(previousAnswer)
         }
-        lines.append(copy.text(turn == 0
-            ? "Give your opening view in plain text, concise."
-            : "Reply directly and continue the dialogue in plain text."))
-        if turn >= totalTurns - 2 {
+        lines.append(copy.text(speakerHasSpoken
+            ? "Reply directly and continue the dialogue in plain text."
+            : "Give your opening view in plain text, concise."))
+        if isFinalRound {
             lines.append(copy.text("This is your final turn — wrap up."))
         }
         lines.append(copy.text("Do not use tools or modify files."))
@@ -56,12 +66,14 @@ private enum RelayDialogueTurnError: Error {
     }
 }
 
-/// One agent-to-agent dialogue: two daemon-backed threads (one per agent)
-/// whose answers are relayed back and forth, turn by turn.
+/// A roundtable of 2–4 agents: each participant keeps its own daemon-backed
+/// thread; speakers take turns in seat order and receive everything said
+/// since their previous turn.
 @MainActor
 final class RelayDialogueRun: ObservableObject, Identifiable {
     struct Message: Identifiable {
         let id = UUID()
+        let participantIndex: Int
         let agentID: String
         let agentName: String
         let text: String
@@ -76,9 +88,10 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         case failed(String)
     }
 
+    static let maxParticipants = 4
+
     let id = UUID()
-    @Published var agentAID: String
-    @Published var agentBID: String
+    @Published var participants: [String]
     @Published var topic = ""
     @Published var rounds = 2
     @Published private(set) var messages: [Message] = []
@@ -86,15 +99,14 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
 
     private weak var relay: RelayService?
     private var engine: Task<Void, Never>?
-    private var threadA: String?
-    private var threadB: String?
+    /// Participant seat index → daemon task ID.
+    private var threads: [Int: String] = [:]
     private var activeTaskID: String?
     private var activeTopic = ""
 
-    init(relay: RelayService?, agentAID: String, agentBID: String) {
+    init(relay: RelayService?, participants: [String]) {
         self.relay = relay
-        self.agentAID = agentAID
-        self.agentBID = agentBID
+        self.participants = participants
     }
 
     var isRunning: Bool {
@@ -104,24 +116,36 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         }
     }
 
+    func addParticipant(_ agentID: String) {
+        guard case .setup = phase,
+              participants.count < Self.maxParticipants else { return }
+        participants.append(agentID)
+    }
+
+    func removeLastParticipant() {
+        guard case .setup = phase, participants.count > 0 else { return }
+        _ = participants.popLast()
+    }
+
     func start() {
         guard case .setup = phase else { return }
         let trimmed = topic.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, rounds >= 1 else { return }
+        guard !trimmed.isEmpty, rounds >= 1, participants.count >= 2 else { return }
         activeTopic = trimmed
-        let total = rounds * 2
+        let total = rounds * participants.count
         engine = Task { [weak self] in
             await self?.runTurns(startingAt: 0, totalTurns: total)
         }
     }
 
-    /// One more exchange (one turn per agent) after a completed dialogue.
+    /// One more full round (one turn per participant) after completion.
     func continueOneRound() {
         guard case .completed = phase else { return }
         rounds += 1
-        let total = rounds * 2
+        let total = rounds * participants.count
+        let count = participants.count
         engine = Task { [weak self] in
-            await self?.runTurns(startingAt: total - 2, totalTurns: total)
+            await self?.runTurns(startingAt: total - count, totalTurns: total)
         }
     }
 
@@ -140,7 +164,7 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
     func statusLabel(copy: RelayCopy) -> String {
         switch phase {
         case .setup:
-            copy.text("Pick two agents and a topic")
+            copy.text("Pick 2–4 agents and a topic")
         case .thinking(_, let name):
             copy.text("⟨NAME⟩ is replying…")
                 .replacingOccurrences(of: "⟨NAME⟩", with: name)
@@ -155,39 +179,70 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         }
     }
 
+    /// Each seat's final message as a confluence snapshot (bridge to arbitration).
+    func resultSnapshots() -> [RelayResultSnapshot] {
+        participants.indices.compactMap { index in
+            guard let last = messages.last(where: { $0.participantIndex == index }) else {
+                return nil
+            }
+            let text = last.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return RelayResultSnapshot(
+                id: UUID(),
+                agentName: last.agentName,
+                projectName: RelayTerminalContext.projectName(
+                    RelayTerminalLauncher.resolvedWorkingDirectory(
+                        relay?.workingDirectory
+                            ?? FileManager.default.homeDirectoryForCurrentUser.path
+                    )
+                ),
+                text: text
+            )
+        }
+    }
+
     private func runTurns(startingAt: Int, totalTurns: Int) async {
         guard let relay else {
             phase = .failed("relay unavailable")
             return
         }
         let copy = RelayCopy(language: relay.language)
+        let seats = participants
+        let count = seats.count
+        guard count >= 2 else { return }
         for turn in startingAt..<totalTurns {
             if Task.isCancelled { return }
-            let isA = turn % 2 == 0
-            let selfID = isA ? agentAID : agentBID
-            let otherID = isA ? agentBID : agentAID
+            let seat = turn % count
+            let selfID = seats[seat]
             guard let selfAgent = relay.agents.first(where: { $0.id == selfID }) else {
                 phase = .failed(copy.text("This agent's CLI was not found."))
                 return
             }
-            let otherName = relay.agents.first { $0.id == otherID }?.name ?? otherID
+            let otherNames = seats.indices
+                .filter { $0 != seat }
+                .map { index in
+                    relay.agents.first { $0.id == seats[index] }?.name ?? seats[index]
+                }
             phase = .thinking(agentID: selfAgent.id, agentName: selfAgent.name)
-            let threadID = isA ? threadA : threadB
+            let threadID = threads[seat]
             let carriesMemory = threadID
                 .flatMap { relay.taskSnapshot($0)?.sessionID } != nil
-            let prompt = RelayDialogueScript.prompt(
-                turn: turn,
-                totalTurns: totalTurns,
+            let lastOwnMessage = messages.lastIndex { $0.participantIndex == seat }
+            let recentStart = lastOwnMessage.map { $0 + 1 } ?? 0
+            let recent = messages[recentStart...].map { ($0.agentName, $0.text) }
+            let prompt = RelayDialogueScript.roundtablePrompt(
+                speakerHasSpoken: lastOwnMessage != nil,
+                isFinalRound: turn >= totalTurns - count,
                 topic: activeTopic,
-                otherName: otherName,
-                previousAnswer: messages.last?.text,
-                includesContext: turn < 2 || !carriesMemory,
+                otherNames: otherNames,
+                recent: Array(recent),
+                includesContext: threadID == nil || !carriesMemory,
                 copy: copy
             )
             do {
                 let answer = try await performTurn(
                     relay: relay,
-                    isA: isA,
+                    seat: seat,
                     agentID: selfAgent.id,
                     agentName: selfAgent.name,
                     canResume: carriesMemory,
@@ -195,6 +250,7 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
                 )
                 guard !Task.isCancelled else { return }
                 messages.append(Message(
+                    participantIndex: seat,
                     agentID: selfAgent.id,
                     agentName: selfAgent.name,
                     text: answer
@@ -217,13 +273,13 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
 
     private func performTurn(
         relay: RelayService,
-        isA: Bool,
+        seat: Int,
         agentID: String,
         agentName: String,
         canResume: Bool,
         prompt: String
     ) async throws -> String {
-        let existing = isA ? threadA : threadB
+        let existing = threads[seat]
         let taskID: String
         let minTurnCount: UInt32
         if let existing, canResume {
@@ -232,7 +288,7 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
             taskID = existing
         } else {
             taskID = try await relay.startDialogueTask(agentID: agentID, prompt: prompt)
-            if isA { threadA = taskID } else { threadB = taskID }
+            threads[seat] = taskID
             minTurnCount = 1
         }
         activeTaskID = taskID
@@ -266,7 +322,7 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
     }
 }
 
-/// Floating window hosting an agent dialogue: setup form, then the live
+/// Floating window hosting an agent roundtable: setup form, then the live
 /// transcript with the relay status.
 struct RelayDialogueWindow: View {
     @ObservedObject var store: RelayTerminalStore
@@ -295,7 +351,7 @@ struct RelayDialogueWindow: View {
         if case .setup = run.phase {
             return copy.text("Dialogue")
         }
-        return "\(agentName(run.agentAID)) ⇄ \(agentName(run.agentBID))"
+        return run.participants.map { agentName($0) }.joined(separator: " ⇄ ")
     }
 
     var body: some View {
@@ -327,6 +383,22 @@ struct RelayDialogueWindow: View {
                     run.continueOneRound()
                 }
                 .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.warning))
+                Button(copy.text("ARBITRATE RESULTS")) {
+                    store.presentResultConfluence(snapshots: run.resultSnapshots())
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix))
+                .disabled(run.resultSnapshots().count < 2)
+                .help(copy.text("Freeze these answers and pick one CLI to arbitrate them"))
+                Button(copy.text("FORK TO TERMINALS")) {
+                    store.beginContextRelay(
+                        results: run.resultSnapshots(),
+                        sourceName: copy.text("Dialogue"),
+                        sourceWindowID: run.id
+                    )
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+                .disabled(run.resultSnapshots().isEmpty)
+                .help(copy.text("Fill these answers into live CLI terminals"))
             }
         } content: {
             if case .setup = run.phase {
@@ -344,8 +416,55 @@ struct RelayDialogueWindow: View {
                 .tracking(1.5)
                 .foregroundStyle(RelayPalette.mix)
 
-            agentPicker(label: "A", selection: $run.agentAID)
-            agentPicker(label: "B", selection: $run.agentBID)
+            HStack(spacing: 6) {
+                if run.participants.isEmpty {
+                    Text(copy.text("Add 2–4 participants in speaking order"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            ForEach(
+                                Array(run.participants.enumerated()), id: \.offset
+                            ) { index, id in
+                                if index > 0 {
+                                    Text("⇄")
+                                        .foregroundStyle(RelayPalette.mix)
+                                }
+                                HStack(spacing: 4) {
+                                    Circle()
+                                        .fill(agentAccent(id))
+                                        .frame(width: 4, height: 4)
+                                    Text("\(index + 1) \(agentName(id).uppercased())")
+                                        .fixedSize()
+                                }
+                            }
+                        }
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                Menu("+ \(copy.text("PARTICIPANT"))") {
+                    ForEach(availableAgents) { agent in
+                        Button(agent.name) {
+                            run.addParticipant(agent.id)
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.mix)
+                .fixedSize()
+                .disabled(run.participants.count >= RelayDialogueRun.maxParticipants)
+                Button(copy.text("UNDO")) {
+                    run.removeLastParticipant()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .disabled(run.participants.isEmpty)
+                Spacer()
+            }
 
             Text(copy.text("Dialogue topic"))
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -377,11 +496,12 @@ struct RelayDialogueWindow: View {
                 }
                 .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.success))
                 .disabled(
-                    run.topic.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    run.participants.count < 2
+                        || run.topic.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
             }
 
-            Text(copy.text("Each side keeps its own session; replies relay automatically."))
+            Text(copy.text("Everyone keeps their own session; turns go around the table."))
                 .font(.system(size: 9.5, design: .monospaced))
                 .foregroundStyle(RelayPalette.muted)
 
@@ -389,28 +509,6 @@ struct RelayDialogueWindow: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func agentPicker(label: String, selection: Binding<String>) -> some View {
-        HStack(spacing: 9) {
-            Text(label)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(RelayPalette.muted)
-                .frame(width: 12, alignment: .leading)
-            Circle()
-                .fill(agentAccent(selection.wrappedValue))
-                .frame(width: 5, height: 5)
-            Menu(agentName(selection.wrappedValue)) {
-                ForEach(availableAgents) { agent in
-                    Button(agent.name) {
-                        selection.wrappedValue = agent.id
-                    }
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .font(.system(size: 11, design: .monospaced))
-            .frame(maxWidth: 220)
-        }
     }
 
     private var transcript: some View {
@@ -513,7 +611,7 @@ struct RelayDialogueSidebarRow: View {
         if case .setup = run.phase {
             return copy.text("Dialogue")
         }
-        return "\(agentName(run.agentAID)) ⇄ \(agentName(run.agentBID))"
+        return run.participants.map { agentName($0) }.joined(separator: " ⇄ ")
     }
 
     var body: some View {

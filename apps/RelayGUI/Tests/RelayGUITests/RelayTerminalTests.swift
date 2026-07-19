@@ -2940,44 +2940,43 @@ struct RelayTerminalTests {
     }
 
     @Test
-    func dialogueScriptStatesContextRelaysAnswersAndMarksFinalTurns() {
+    func roundtableScriptFramesContextRelaysRecentAndMarksFinalRound() {
         let copy = RelayCopy(language: .chinese)
 
-        let opening = RelayDialogueScript.prompt(
-            turn: 0, totalTurns: 4, topic: "9.11 和 9.9 谁大",
-            otherName: "Codex", previousAnswer: nil,
+        let opening = RelayDialogueScript.roundtablePrompt(
+            speakerHasSpoken: false, isFinalRound: false,
+            topic: "9.11 和 9.9 谁大",
+            otherNames: ["Codex", "Grok"], recent: [],
             includesContext: true, copy: copy
         )
-        #expect(opening.contains("Codex"))
+        #expect(opening.contains("Codex / Grok"))
+        #expect(opening.contains("圆桌"))
         #expect(opening.contains("9.11 和 9.9 谁大"))
         #expect(opening.contains("开场观点"))
-        #expect(opening.contains("不要使用任何工具"))
         #expect(!opening.contains("最后一轮"))
 
-        let relayed = RelayDialogueScript.prompt(
-            turn: 1, totalTurns: 4, topic: "话题",
-            otherName: "Claude", previousAnswer: "我认为 9.9 更大",
-            includesContext: true, copy: copy
-        )
-        #expect(relayed.contains("对方（Claude）说："))
-        #expect(relayed.contains("我认为 9.9 更大"))
-        #expect(relayed.contains("继续这场对话"))
-
-        let resumed = RelayDialogueScript.prompt(
-            turn: 2, totalTurns: 4, topic: "话题",
-            otherName: "Codex", previousAnswer: "回应",
+        let relayed = RelayDialogueScript.roundtablePrompt(
+            speakerHasSpoken: true, isFinalRound: true,
+            topic: "话题",
+            otherNames: ["Claude"],
+            recent: [("Claude", "我认为 9.9 更大"), ("Grok", "同意")],
             includesContext: false, copy: copy
         )
-        #expect(!resumed.contains("主题："))
-        #expect(resumed.contains("最后一轮"))
+        #expect(!relayed.contains("主题："))
+        #expect(relayed.contains("【Claude】"))
+        #expect(relayed.contains("我认为 9.9 更大"))
+        #expect(relayed.contains("【Grok】"))
+        #expect(relayed.contains("最后一轮"))
+        #expect(relayed.contains("继续这场对话"))
 
-        let sessionlessResume = RelayDialogueScript.prompt(
-            turn: 2, totalTurns: 6, topic: "话题",
-            otherName: "Codex", previousAnswer: "回应",
+        let twoPartyContext = RelayDialogueScript.roundtablePrompt(
+            speakerHasSpoken: true, isFinalRound: false,
+            topic: "话题", otherNames: ["Codex"],
+            recent: [("Codex", "回应")],
             includesContext: true, copy: copy
         )
-        #expect(sessionlessResume.contains("主题："))
-        #expect(!sessionlessResume.contains("最后一轮"))
+        #expect(twoPartyContext.contains("另一个 AI 智能体"))
+        #expect(twoPartyContext.contains("主题："))
     }
 
     @MainActor
@@ -2985,9 +2984,9 @@ struct RelayTerminalTests {
     func dialogueWindowsRegisterInWorkspaceAndRespectLimit() {
         let store = RelayTerminalStore()
         store.reportWorkspaceSize(CGSize(width: 1200, height: 800))
-        let first = RelayDialogueRun(relay: nil, agentAID: "claude", agentBID: "codex")
-        let second = RelayDialogueRun(relay: nil, agentAID: "codex", agentBID: "ollama")
-        let third = RelayDialogueRun(relay: nil, agentAID: "a", agentBID: "b")
+        let first = RelayDialogueRun(relay: nil, participants: ["claude", "codex"])
+        let second = RelayDialogueRun(relay: nil, participants: ["codex", "ollama"])
+        let third = RelayDialogueRun(relay: nil, participants: ["a", "b"])
 
         store.openDialogue(first)
         store.openDialogue(second)
@@ -3057,7 +3056,7 @@ struct RelayTerminalTests {
         #expect(store.orderedItems.map(\.id) == [panel.id])
         #expect(store.focusedID == panel.id)
 
-        let dialogue = RelayDialogueRun(relay: nil, agentAID: "a", agentBID: "b")
+        let dialogue = RelayDialogueRun(relay: nil, participants: ["a", "b"])
         store.openDialogue(dialogue)
         #expect(store.focusedID == dialogue.id)
 

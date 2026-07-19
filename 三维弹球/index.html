@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>三维弹球 · SPACE PINBALL</title>
+<style>
+  :root{
+    --ink:#e8ecff;        /* 骨白 */
+    --dim:#8ea0d8;        /* 雾蓝标签 */
+    --amber:#ffbf66;      /* 琥珀仪表 */
+    --cyan:#6ff3ff;       /* 磷光青 */
+    --rose:#ff5fa2;       /* 曙红 */
+    --plate:rgba(10,15,42,.62);
+    --line:rgba(130,160,255,.28);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    overflow:hidden;background:#0a0c1e;color:var(--ink);
+    font-family:-apple-system,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-user-select:none;user-select:none;touch-action:none;
+  }
+  canvas{display:block}
+
+  /* ── 仪表条 ─────────────────────────── */
+  #hud{
+    position:fixed;inset:0 0 auto 0;display:flex;justify-content:space-between;
+    align-items:flex-start;padding:14px 16px;pointer-events:none;z-index:5;
+  }
+  .plate{
+    background:var(--plate);border:1px solid var(--line);
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    padding:8px 16px 9px;
+    clip-path:polygon(9px 0,100% 0,100% calc(100% - 9px),calc(100% - 9px) 100%,0 100%,0 9px);
+  }
+  .plate .tag{
+    font-size:11px;letter-spacing:.32em;color:var(--dim);margin-bottom:2px;
+  }
+  .plate .val{
+    font-size:26px;font-weight:700;color:var(--amber);
+    font-variant-numeric:tabular-nums;line-height:1.05;
+    text-shadow:0 0 14px rgba(255,170,60,.45);
+  }
+  #hudRight{display:flex;gap:10px;align-items:flex-start}
+  #hiVal{font-size:16px;color:#d9c08a;text-shadow:none}
+  #ballsVal{font-size:15px;letter-spacing:.35em;color:var(--cyan);
+    text-shadow:0 0 10px rgba(90,230,255,.6)}
+
+  /* ── 蓄力条 ─────────────────────────── */
+  #power{
+    position:fixed;right:14px;bottom:16px;width:10px;height:130px;z-index:5;
+    border:1px solid var(--line);background:rgba(8,12,34,.6);
+    clip-path:polygon(0 6px,6px 0,100% 0,100% calc(100% - 6px),calc(100% - 6px) 100%,0 100%);
+    opacity:0;transition:opacity .18s;pointer-events:none;
+  }
+  #power.on{opacity:1}
+  #powerFill{
+    position:absolute;left:0;right:0;bottom:0;height:0%;
+    background:linear-gradient(180deg,#ffe6a8,#ffbf66 40%,#ff7a3c);
+    box-shadow:0 0 12px rgba(255,170,60,.7);
+  }
+
+  /* ── 浮动提示 ───────────────────────── */
+  #toasts{position:fixed;left:0;right:0;top:21%;display:flex;flex-direction:column;
+    align-items:center;gap:8px;pointer-events:none;z-index:6}
+  .toast{
+    font-size:17px;font-weight:600;letter-spacing:.22em;color:var(--cyan);
+    text-shadow:0 0 16px rgba(90,230,255,.8);
+    animation:rise 1.7s ease-out forwards;
+  }
+  .toast.amber{color:var(--amber);text-shadow:0 0 16px rgba(255,170,60,.8)}
+  @keyframes rise{
+    0%{opacity:0;transform:translateY(14px)}
+    12%{opacity:1;transform:translateY(0)}
+    72%{opacity:1}
+    100%{opacity:0;transform:translateY(-18px)}
+  }
+
+  /* ── 覆盖层（菜单 / 结算）────────────── */
+  .overlay{
+    position:fixed;inset:0;z-index:10;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(ellipse at 50% 42%,rgba(10,14,38,.55) 0%,rgba(4,6,17,.88) 78%);
+  }
+  .overlay.hidden{display:none}
+  .panel{text-align:center;padding:34px 46px 38px;max-width:min(88vw,430px)}
+  .eyebrow{
+    font-size:11px;letter-spacing:.62em;color:var(--cyan);margin-bottom:14px;
+    text-shadow:0 0 12px rgba(90,230,255,.55);
+  }
+  h1{
+    font-size:52px;font-weight:800;letter-spacing:.3em;margin-left:.3em;/* 抵消末字间距 */
+    background:linear-gradient(180deg,#fff3dd 10%,var(--amber) 55%,#ff8f4d 95%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    filter:drop-shadow(0 0 22px rgba(255,170,60,.35));
+    margin-bottom:26px;
+  }
+  #finalScore{font-size:44px;font-weight:800;color:var(--amber);
+    font-variant-numeric:tabular-nums;text-shadow:0 0 20px rgba(255,170,60,.5);margin-bottom:6px}
+  #finalHi{font-size:13px;letter-spacing:.2em;color:var(--dim);margin-bottom:24px}
+  #newRecord{display:inline-block;font-size:12px;letter-spacing:.3em;color:#101226;
+    background:var(--cyan);padding:3px 12px;margin-bottom:18px;font-weight:700;
+    clip-path:polygon(6px 0,100% 0,calc(100% - 6px) 100%,0 100%)}
+  .rules{font-size:12.5px;line-height:2;color:var(--dim);letter-spacing:.08em;margin-bottom:26px}
+  .rules b{color:var(--ink);font-weight:600}
+  .keys{display:grid;grid-template-columns:auto auto;gap:7px 16px;justify-content:center;
+    align-items:center;font-size:13px;color:var(--dim);margin-bottom:30px;letter-spacing:.06em}
+  .keys .k{text-align:right}
+  kbd{
+    display:inline-block;min-width:26px;padding:2px 9px;margin:0 2px;font-size:12px;
+    font-family:ui-monospace,Menlo,monospace;color:var(--ink);
+    background:rgba(24,32,74,.75);border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:4px;
+  }
+  button.cta{
+    font:inherit;font-size:16px;font-weight:700;letter-spacing:.3em;text-indent:.3em;
+    color:#221130;background:linear-gradient(180deg,#ffe0a0,#ffb84d 55%,#ff9040);
+    border:0;padding:13px 46px;cursor:pointer;
+    clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px);
+    box-shadow:0 0 26px rgba(255,160,60,.35);
+    transition:transform .12s,box-shadow .12s,filter .12s;
+  }
+  button.cta:hover{filter:brightness(1.08);box-shadow:0 0 34px rgba(255,170,60,.55)}
+  button.cta:active{transform:translateY(1px) scale(.985)}
+  button.cta:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+
+  /* ── 触屏发射钮 ─────────────────────── */
+  #launchBtn{
+    position:fixed;right:34px;bottom:30px;z-index:7;display:none;
+    font:inherit;font-size:14px;font-weight:700;letter-spacing:.2em;color:#221130;
+    background:linear-gradient(180deg,#ffe0a0,#ffb84d 60%,#ff9040);border:0;
+    width:92px;height:92px;border-radius:50%;
+    box-shadow:0 0 24px rgba(255,160,60,.4);
+  }
+  .touch #launchBtn.show{display:block}
+  .touch .keys{display:none}
+  .touchHint{display:none;font-size:12.5px;color:var(--dim);letter-spacing:.1em;
+    line-height:2;margin-bottom:26px}
+  .touch .touchHint{display:block}
+
+  #err{position:fixed;left:8px;bottom:8px;z-index:99;color:#ff7788;font:11px/1.5 Menlo,monospace;
+    white-space:pre-wrap;max-width:80vw;pointer-events:none}
+
+  @media (prefers-reduced-motion:reduce){
+    .toast{animation-duration:.01s}
+    button.cta{transition:none}
+  }
+  @media (max-width:560px){
+    h1{font-size:40px}
+    .panel{padding:24px 20px 30px}
+    .plate .val{font-size:21px}
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="plate">
+    <div class="tag">分数</div>
+    <div class="val" id="scoreVal">0</div>
+  </div>
+  <div id="hudRight">
+    <div class="plate">
+      <div class="tag">最高分</div>
+      <div class="val" id="hiVal">0</div>
+    </div>
+    <div class="plate">
+      <div class="tag">弹球</div>
+      <div class="val" id="ballsVal">●●●</div>
+    </div>
+  </div>
+</div>
+
+<div id="power"><div id="powerFill"></div></div>
+<div id="toasts"></div>
+<button id="launchBtn">按住<br>蓄力</button>
+
+<div class="overlay" id="menu">
+  <div class="panel">
+    <div class="eyebrow">SPACE PINBALL · 星际弹珠台</div>
+    <h1>三维弹球</h1>
+    <p class="rules">
+      撞击<b>缓冲柱</b> +100 · <b>弹弓</b> +50 · 点亮左侧<b>三盏目标灯</b> +1000<br>
+      累计 5000 分奖励一颗弹球，共 3 颗，守住它们
+    </p>
+    <div class="keys">
+      <span class="k"><kbd>←</kbd><kbd>→</kbd> 或 <kbd>Z</kbd><kbd>/</kbd></span><span>左右弹板</span>
+      <span class="k"><kbd>空格</kbd></span><span>按住蓄力，松开发射</span>
+      <span class="k"><kbd>R</kbd></span><span>重新开始</span>
+    </div>
+    <p class="touchHint">点按<b>左 / 右半屏</b>控制弹板<br>按住右下角圆钮蓄力，松开发射</p>
+    <button class="cta" id="startBtn">开始游戏</button>
+  </div>
+</div>
+
+<div class="overlay hidden" id="over">
+  <div class="panel">
+    <div class="eyebrow">本局结束</div>
+    <div id="finalScore">0</div>
+    <span id="newRecord" style="display:none">新纪录</span>
+    <div id="finalHi">最高分 0</div>
+    <button class="cta" id="againBtn">再来一局</button>
+  </div>
+</div>
+
+<script src="./three.min.js"></script>
+<script src="./game.js"></script>
+</body>
+</html>
