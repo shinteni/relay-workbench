@@ -37,6 +37,7 @@ struct RelayAgent: Identifiable, Hashable {
     let manifestURL: URL
     let adapterExecutablePath: String?
     let usesGenericRuntime: Bool
+    var usesAcpRuntime: Bool = false
     let registrationEnvironment: [String: String]
     let capabilities: Set<String>
     let versionExecutablePath: String?
@@ -65,6 +66,7 @@ private struct AdapterManifest: Decodable {
     let detail: String
     let adapterExecutable: String?
     let generic: AdapterGenericSpec?
+    let acp: AdapterAcpSpec?
     let capabilities: [String]
     let requirements: [AdapterRequirement]
     let options: [AdapterManifestOption]?
@@ -77,6 +79,7 @@ private struct AdapterManifest: Decodable {
         case detail
         case adapterExecutable = "adapter_executable"
         case generic
+        case acp
         case capabilities
         case requirements
         case options
@@ -134,6 +137,11 @@ private struct AdapterGenericSpec: Decodable {
     }
 }
 
+private struct AdapterAcpSpec: Decodable {
+    let command: String
+    let arguments: [String]?
+}
+
 private struct AdapterRequirement: Decodable {
     let name: String
     let environment: String
@@ -154,6 +162,7 @@ enum AdapterCatalog {
         userDirectory: URL,
         home: URL,
         genericAdapter: URL? = nil,
+        acpAdapter: URL? = nil,
         codexModels: [String] = [],
         claudeModels: [String] = []
     ) -> [RelayAgent] {
@@ -173,6 +182,7 @@ enum AdapterCatalog {
                     at: url,
                     home: home,
                     genericAdapter: genericAdapter,
+                    acpAdapter: acpAdapter,
                     codexModels: codexModels,
                     claudeModels: claudeModels
                 )
@@ -191,7 +201,7 @@ enum AdapterCatalog {
         return agents
     }
 
-    static func loadManifest(at url: URL, home: URL, genericAdapter: URL? = nil, codexModels: [String] = [], claudeModels: [String] = []) -> RelayAgent {
+    static func loadManifest(at url: URL, home: URL, genericAdapter: URL? = nil, acpAdapter: URL? = nil, codexModels: [String] = [], claudeModels: [String] = []) -> RelayAgent {
         let manifest: AdapterManifest
         do {
             manifest = try JSONDecoder().decode(AdapterManifest.self, from: Data(contentsOf: url))
@@ -211,8 +221,10 @@ enum AdapterCatalog {
                 relativeTo: url.deletingLastPathComponent(),
                 home: home
             )
-        } else if let genericAdapter {
+        } else if manifest.generic != nil, let genericAdapter {
             executable = genericAdapter
+        } else if manifest.acp != nil, let acpAdapter {
+            executable = acpAdapter
         } else {
             return RelayAgent(
                 id: manifest.id,
@@ -220,13 +232,18 @@ enum AdapterCatalog {
                 detail: manifest.detail,
                 manifestURL: url,
                 adapterExecutablePath: nil,
-                usesGenericRuntime: true,
+                usesGenericRuntime: manifest.generic != nil,
+                usesAcpRuntime: manifest.acp != nil,
                 registrationEnvironment: [:],
                 capabilities: Set(manifest.capabilities),
                 versionExecutablePath: nil,
                 versionArguments: [],
                 version: manifest.versionLabel,
-                health: .missing("Generic adapter runtime is unavailable")
+                health: .missing(
+                    manifest.acp != nil
+                        ? "ACP adapter runtime is unavailable"
+                        : "Generic adapter runtime is unavailable"
+                )
             )
         }
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
@@ -237,6 +254,7 @@ enum AdapterCatalog {
                 manifestURL: url,
                 adapterExecutablePath: nil,
                 usesGenericRuntime: manifest.generic != nil,
+                usesAcpRuntime: manifest.acp != nil,
                 registrationEnvironment: [:],
                 capabilities: Set(manifest.capabilities),
                 versionExecutablePath: nil,
@@ -267,6 +285,7 @@ enum AdapterCatalog {
                     manifestURL: url,
                     adapterExecutablePath: executable.path,
                     usesGenericRuntime: manifest.generic != nil,
+                    usesAcpRuntime: manifest.acp != nil,
                     registrationEnvironment: [:],
                     capabilities: Set(manifest.capabilities),
                     versionExecutablePath: nil,
@@ -284,6 +303,9 @@ enum AdapterCatalog {
         if manifest.generic != nil {
             environment["RELAY_GENERIC_SPEC"] = url.standardizedFileURL.path
         }
+        if manifest.acp != nil {
+            environment["RELAY_ACP_SPEC"] = url.standardizedFileURL.path
+        }
 
         return RelayAgent(
             id: manifest.id,
@@ -292,6 +314,7 @@ enum AdapterCatalog {
             manifestURL: url,
             adapterExecutablePath: executable.path,
             usesGenericRuntime: manifest.generic != nil,
+            usesAcpRuntime: manifest.acp != nil,
             registrationEnvironment: environment,
             capabilities: Set(manifest.capabilities),
             versionExecutablePath: versionExecutablePath,
@@ -455,20 +478,24 @@ enum AdapterCatalog {
         }
         let options = manifest.options ?? []
         try validateOptionPresentation(options)
-        if manifest.generic == nil {
+        if manifest.generic == nil, manifest.acp == nil {
             try validateAdapterOptions(options)
         }
-        switch (manifest.adapterExecutable, manifest.generic) {
-        case (nil, nil):
-            throw catalogError("Adapter must declare adapter_executable or generic")
-        case (.some, .some):
-            throw catalogError("adapter_executable and generic cannot both be declared")
-        case let (.some(adapterExecutable), nil):
+        let declaredRuntimes = [
+            manifest.adapterExecutable != nil,
+            manifest.generic != nil,
+            manifest.acp != nil,
+        ].filter { $0 }.count
+        guard declaredRuntimes != 0 else {
+            throw catalogError("Adapter must declare adapter_executable, generic, or acp")
+        }
+        guard declaredRuntimes == 1 else {
+            throw catalogError("adapter_executable, generic and acp are mutually exclusive")
+        }
+        if let adapterExecutable = manifest.adapterExecutable {
             guard !adapterExecutable.isEmpty, adapterExecutable.utf8.count <= 1024 else {
                 throw catalogError("Adapter executable path is invalid")
             }
-        case (nil, .some):
-            break
         }
         guard manifest.capabilities.count <= 16,
               Set(manifest.capabilities).count == manifest.capabilities.count,

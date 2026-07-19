@@ -228,6 +228,7 @@ struct ContentView: View {
             RelayTerminalWorkspace(
                 store: terminals,
                 agents: relay.agents,
+                personas: relay.personas,
                 onRestoreDesk: restoreDesk
             )
         }

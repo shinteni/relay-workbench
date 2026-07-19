@@ -292,45 +292,49 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
             if Task.isCancelled { return }
             let seat = turn % count
             let selfID = seats[seat]
-            guard let selfAgent = relay.agents.first(where: { $0.id == selfID }) else {
+            guard let member = relay.resolveMember(selfID) else {
                 phase = .failed(copy.text("This agent's CLI was not found."))
                 return
             }
             let otherNames = seats.indices
                 .filter { $0 != seat }
                 .map { index in
-                    relay.agents.first { $0.id == seats[index] }?.name ?? seats[index]
+                    relay.resolveMember(seats[index])?.displayName ?? seats[index]
                 }
-            phase = .thinking(agentID: selfAgent.id, agentName: selfAgent.name)
+            phase = .thinking(agentID: member.agentID, agentName: member.displayName)
             let threadID = threads[seat]
             let carriesMemory = threadID
                 .flatMap { relay.taskSnapshot($0)?.sessionID } != nil
             let lastOwnMessage = messages.lastIndex { $0.participantIndex == seat }
             let recentStart = lastOwnMessage.map { $0 + 1 } ?? 0
             let recent = messages[recentStart...].map { ($0.agentName, $0.text) }
-            let prompt = RelayDialogueScript.roundtablePrompt(
-                speakerHasSpoken: lastOwnMessage != nil,
-                isFinalRound: turn >= totalTurns - count,
-                topic: activeTopic,
-                otherNames: otherNames,
-                recent: Array(recent),
-                includesContext: threadID == nil || !carriesMemory,
-                copy: copy
+            let prompt = RelayPersonaStore.applyRules(
+                member.rules,
+                to: RelayDialogueScript.roundtablePrompt(
+                    speakerHasSpoken: lastOwnMessage != nil,
+                    isFinalRound: turn >= totalTurns - count,
+                    topic: activeTopic,
+                    otherNames: otherNames,
+                    recent: Array(recent),
+                    includesContext: threadID == nil || !carriesMemory,
+                    copy: copy
+                )
             )
             do {
                 let answer = try await performTurn(
                     relay: relay,
                     seat: seat,
-                    agentID: selfAgent.id,
-                    agentName: selfAgent.name,
+                    agentID: member.agentID,
+                    agentName: member.displayName,
                     canResume: carriesMemory,
-                    prompt: prompt
+                    prompt: prompt,
+                    optionOverrides: member.optionOverrides
                 )
                 guard !Task.isCancelled else { return }
                 messages.append(Message(
                     participantIndex: seat,
-                    agentID: selfAgent.id,
-                    agentName: selfAgent.name,
+                    agentID: member.agentID,
+                    agentName: member.displayName,
                     text: answer
                 ))
             } catch is CancellationError {
@@ -356,17 +360,22 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         agentID: String,
         agentName: String,
         canResume: Bool,
-        prompt: String
+        prompt: String,
+        optionOverrides: [String: String] = [:]
     ) async throws -> String {
         let existing = threads[seat]
         let taskID: String
         let minTurnCount: UInt32
         if let existing, canResume {
             minTurnCount = (relay.taskSnapshot(existing)?.turnCount ?? 0) + 1
-            try await relay.continueDialogueTask(taskID: existing, prompt: prompt)
+            try await relay.continueDialogueTask(
+                taskID: existing, prompt: prompt, optionOverrides: optionOverrides
+            )
             taskID = existing
         } else {
-            taskID = try await relay.startDialogueTask(agentID: agentID, prompt: prompt)
+            taskID = try await relay.startDialogueTask(
+                agentID: agentID, prompt: prompt, optionOverrides: optionOverrides
+            )
             threads[seat] = taskID
             minTurnCount = 1
         }
@@ -407,6 +416,7 @@ struct RelayDialogueWindow: View {
     @ObservedObject var store: RelayTerminalStore
     @ObservedObject var run: RelayDialogueRun
     let agents: [RelayAgent]
+    var personas: [RelayPersona] = []
     let frame: CGRect
     let canvasSize: CGSize
     let focused: Bool
@@ -419,12 +429,26 @@ struct RelayDialogueWindow: View {
         agents.filter(\.isAvailable)
     }
 
+    /// Personas whose underlying agent is currently available.
+    private var availablePersonas: [RelayPersona] {
+        personas.filter { persona in
+            agents.first { $0.id == persona.agentID }?.isAvailable == true
+        }
+    }
+
     private func agentName(_ id: String) -> String {
-        agents.first { $0.id == id }?.name ?? id
+        if let personaID = RelayPersonaStore.personaID(fromMember: id) {
+            return personas.first { $0.id == personaID }?.name ?? id
+        }
+        return agents.first { $0.id == id }?.name ?? id
     }
 
     private func agentAccent(_ id: String) -> SwiftUI.Color {
-        agents.first { $0.id == id }?.accent ?? RelayPalette.signal
+        let agentID = RelayPersonaStore.personaID(fromMember: id)
+            .flatMap { personaID in
+                personas.first { $0.id == personaID }?.agentID
+            } ?? id
+        return agents.first { $0.id == agentID }?.accent ?? RelayPalette.signal
     }
 
     private var headerTitle: String {
@@ -611,6 +635,16 @@ struct RelayDialogueWindow: View {
                     ForEach(availableAgents) { agent in
                         Button(agent.name) {
                             run.addParticipant(agent.id)
+                        }
+                    }
+                    if !availablePersonas.isEmpty {
+                        Divider()
+                        ForEach(availablePersonas) { persona in
+                            Button("☰ \(persona.name)") {
+                                run.addParticipant(
+                                    RelayPersonaStore.memberID(for: persona)
+                                )
+                            }
                         }
                     }
                 }

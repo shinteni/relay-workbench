@@ -2626,6 +2626,7 @@ struct RelayDecisionLibraryDeck: View {
 
 struct RelayResultArbitrationDecisionDeck: View {
     @ObservedObject var store: RelayTerminalStore
+    @EnvironmentObject private var relay: RelayService
     let decision: RelayResultArbitrationDecision
     let checkpoint: RelayDecisionCheckpoint?
     @State private var confirmTrash = false
@@ -2637,6 +2638,8 @@ struct RelayResultArbitrationDecisionDeck: View {
     @State private var decisionBriefVisible = false
     @State private var decisionBriefInstruction = ""
     @State private var decisionBriefTargetID: UUID?
+    @State private var baselineDrift: String?
+    @State private var baselineDriftChecking = false
     @FocusState private var decisionBriefInstructionFocused: Bool
     @Environment(\.relayLanguage) private var language
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -2703,6 +2706,70 @@ struct RelayResultArbitrationDecisionDeck: View {
             .foregroundStyle(RelayPalette.muted.opacity(0.6))
     }
 
+    /// Git position at save time plus an explicit, on-demand drift check —
+    /// comparison only, nothing is checked out or modified.
+    private func baselineRow(_ baseline: RelayDecisionBaseline) -> some View {
+        HStack(spacing: 8) {
+            Text(copy.text("CODE BASELINE"))
+                .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                .tracking(0.8)
+                .foregroundStyle(RelayPalette.muted)
+            Text(baseline.shortCommit)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(RelayPalette.signal)
+            Text(baseline.dirty
+                ? copy.text("dirty at save") : copy.text("clean at save"))
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(baseline.dirty ? RelayPalette.warning : RelayPalette.muted)
+            Text(baseline.projectPath)
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(RelayPalette.muted)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            if let baselineDrift {
+                Text(baselineDrift)
+                    .font(.system(size: 8.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(
+                        baselineDrift == copy.text("HEAD unchanged")
+                            ? RelayPalette.success : RelayPalette.warning
+                    )
+                    .textSelection(.enabled)
+            }
+            Button(copy.text("CHECK DRIFT")) {
+                baselineDriftChecking = true
+                Task {
+                    let drift = await baseline.checkDrift()
+                    switch drift {
+                    case .unchanged(let dirtyNow):
+                        baselineDrift = dirtyNow
+                            ? copy.text("HEAD unchanged · uncommitted changes present")
+                            : copy.text("HEAD unchanged")
+                    case .moved(let current, _):
+                        baselineDrift = copy.text("HEAD moved to ⟨COMMIT⟩")
+                            .replacingOccurrences(
+                                of: "⟨COMMIT⟩", with: String(current.prefix(8))
+                            )
+                    case .missing:
+                        baselineDrift = copy.text("repository unavailable")
+                    }
+                    baselineDriftChecking = false
+                }
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+            .disabled(baselineDriftChecking)
+            .help(copy.text("Compare the stored baseline with the repository's current HEAD — read-only"))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(RelayPalette.raised.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(RelayPalette.line, lineWidth: 1)
+        }
+    }
+
     private func verdictTally(_ text: String, tint: SwiftUI.Color) -> some View {
         Text(text)
             .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -2737,6 +2804,9 @@ struct RelayResultArbitrationDecisionDeck: View {
             header
             if let checkpoint, !deltaVisible {
                 evidenceTimeline(checkpoint)
+                if let baseline = checkpoint.baseline {
+                    baselineRow(baseline)
+                }
             }
             if let checkpoint, annotationEditorVisible, !deltaVisible {
                 annotationEditor(checkpoint)
@@ -3379,6 +3449,21 @@ struct RelayResultArbitrationDecisionDeck: View {
                     .font(.system(size: 8, design: .monospaced))
                     .foregroundStyle(RelayPalette.muted)
                     .lineLimit(1)
+                if let confidence = decision.structuredConfidence {
+                    Text(copy.text("confidence: ⟨LEVEL⟩")
+                        .replacingOccurrences(of: "⟨LEVEL⟩", with: confidence))
+                        .font(.system(size: 7, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            confidence == "high"
+                                ? RelayPalette.success
+                                : confidence == "low"
+                                    ? RelayPalette.warning : RelayPalette.signal
+                        )
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(RelayPalette.raised.opacity(0.7))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
                 Spacer()
                 Text(copy.text("SEALED"))
                     .font(.system(size: 7, weight: .bold, design: .monospaced))
@@ -3389,12 +3474,33 @@ struct RelayResultArbitrationDecisionDeck: View {
             .background(targetAccent.opacity(0.10))
 
             ScrollView([.vertical, .horizontal], showsIndicators: true) {
-                Text(decision.result.text)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(RelayPalette.text)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(9)
+                VStack(alignment: .leading, spacing: 8) {
+                    if let verdict = decision.structuredVerdict {
+                        Text(verdict)
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                            .textSelection(.enabled)
+                        if let rationale = decision.structuredRationale {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(copy.text("RATIONALE"))
+                                    .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                                    .tracking(0.8)
+                                    .foregroundStyle(RelayPalette.muted)
+                                Text(rationale)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(RelayPalette.muted)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    } else {
+                        Text(decision.result.text)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .padding(9)
             }
             .background(RelayPalette.ink.opacity(0.86))
         }
@@ -3790,7 +3896,15 @@ struct RelayResultArbitrationDecisionDeck: View {
 
     private func saveOrOpenLibrary() {
         if store.liveDecisionCheckpointID == nil {
-            _ = store.saveResultArbitrationDecision()
+            let project = RelayTerminalLauncher.resolvedWorkingDirectory(
+                relay.workingDirectory
+            )
+            Task {
+                let baseline = await RelayDecisionBaseline.capture(
+                    projectPath: project
+                )
+                _ = store.saveResultArbitrationDecision(baseline: baseline)
+            }
         } else {
             updateState { store.showDecisionLibrary(returningToLiveDecision: true) }
         }

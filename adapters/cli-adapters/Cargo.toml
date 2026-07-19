@@ -1,6 +1,6 @@
 [package]
 name = "cli-adapters"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
@@ -24,3 +24,7 @@ path = "src/bin/mix-adapter.rs"
 [[bin]]
 name = "generic-adapter"
 path = "src/bin/generic-adapter.rs"
+
+[[bin]]
+name = "acp-adapter"
+path = "src/bin/acp-adapter.rs"

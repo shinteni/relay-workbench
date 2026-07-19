@@ -1531,6 +1531,14 @@ struct RelayTerminalTests {
             )
         ) { _ in nil }
         #expect(generic == .init(executable: "/bin/gemini", arguments: []))
+
+        let acp = RelayTerminalLauncher.spec(
+            for: agent(
+                id: "acpcli",
+                environment: ["RELAY_ACPCLI_PATH": "/bin/acpcli", "RELAY_ACP_SPEC": "/tmp/a.json"]
+            )
+        ) { _ in nil }
+        #expect(acp == .init(executable: "/bin/acpcli", arguments: []))
     }
 
     @Test

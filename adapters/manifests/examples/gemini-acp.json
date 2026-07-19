@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "gemini",
+  "name": "Gemini",
+  "detail": "Gemini CLI over ACP",
+  "capabilities": ["session_resume", "interactive_input"],
+  "acp": {
+    "command": "RELAY_GEMINI_PATH",
+    "arguments": ["--experimental-acp"]
+  },
+  "requirements": [
+    {
+      "name": "Gemini CLI",
+      "environment": "RELAY_GEMINI_PATH",
+      "candidates": [
+        "~/.local/bin/gemini",
+        "/opt/homebrew/bin/gemini",
+        "/usr/local/bin/gemini"
+      ],
+      "version_arguments": ["--version"]
+    }
+  ]
+}

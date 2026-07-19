@@ -30,6 +30,10 @@ struct RelaySettingsRoot: View {
 struct SettingsView: View {
     @EnvironmentObject private var relay: RelayService
     @State private var selection = RelaySettingsSection.general
+    @State private var personaDraft: RelayPersona?
+    @State private var personaError: String?
+    @State private var hookDraft: RelayTaskHook?
+    @State private var hookError: String?
 
     private var copy: RelayCopy { RelayCopy(language: relay.language) }
 
@@ -185,6 +189,8 @@ struct SettingsView: View {
                     .buttonStyle(SettingsActionButtonStyle())
             }
 
+            hookSettings
+
             settingsRow(
                 title: copy.text("Default working directory"),
                 description: copy.text("Used when creating a new thread. Existing threads keep their own working directory.")
@@ -243,6 +249,351 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            personaSettings
+        }
+    }
+
+    private var hookSettings: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(copy.text("Task lifecycle hooks"))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(copy.text("Run a local command when a background task completes, fails, or waits for you. Task facts arrive as RELAY_TASK_* environment variables; hooks fire while the GUI is running."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(RelayPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button(copy.text("ADD HOOK")) {
+                    hookDraft = RelayTaskHook(event: .completed, command: "")
+                    hookError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                .disabled(relay.taskHooks.count >= RelayTaskHookStore.maxCount)
+            }
+
+            ForEach(relay.taskHooks) { hook in
+                HStack(spacing: 10) {
+                    Text(copy.text(hookEventKey(hook.event)))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(hookEventTint(hook.event))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(hookEventTint(hook.event).opacity(0.12))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    Text(hook.agentID.flatMap { id in
+                        relay.agents.first { $0.id == id }?.name
+                    } ?? copy.text("Any agent"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                    Text(hook.command)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button(copy.text("EDIT")) {
+                        hookDraft = hook
+                        hookError = nil
+                    }
+                    .buttonStyle(SettingsActionButtonStyle())
+                    Button(copy.text("DELETE")) {
+                        relay.deleteTaskHook(id: hook.id)
+                    }
+                    .buttonStyle(SettingsActionButtonStyle())
+                }
+                .padding(.vertical, 4)
+            }
+
+            if hookDraft != nil {
+                hookEditor
+            }
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+        }
+        .padding(.vertical, 22)
+    }
+
+    private var hookEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                settingsMenu(
+                    copy.text(hookEventKey(hookDraft?.event ?? .completed)),
+                    width: 140
+                ) {
+                    ForEach(RelayTaskHook.Event.allCases, id: \.rawValue) { event in
+                        Button(copy.text(hookEventKey(event))) {
+                            hookDraft?.event = event
+                        }
+                    }
+                }
+                settingsMenu(
+                    hookDraft?.agentID.flatMap { id in
+                        relay.agents.first { $0.id == id }?.name
+                    } ?? copy.text("Any agent"),
+                    width: 160
+                ) {
+                    Button(copy.text("Any agent")) { hookDraft?.agentID = nil }
+                    ForEach(relay.agents) { agent in
+                        Button(agent.name) { hookDraft?.agentID = agent.id }
+                    }
+                }
+                Spacer()
+            }
+
+            TextField(
+                copy.text("Command run with /bin/zsh -c (task facts come via RELAY_TASK_* env)"),
+                text: Binding(
+                    get: { hookDraft?.command ?? "" },
+                    set: { hookDraft?.command = $0 }
+                ),
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 11, design: .monospaced))
+            .lineLimit(1...4)
+            .padding(9)
+            .background(RelayPalette.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if let hookError {
+                Text(copy.text(hookError))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(RelayPalette.danger)
+            }
+
+            HStack(spacing: 8) {
+                Button(copy.text("SAVE HOOK")) {
+                    guard var draft = hookDraft else { return }
+                    draft.command = draft.command
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let reason = RelayTaskHookStore.validationError(
+                        command: draft.command
+                    ) {
+                        hookError = reason
+                        return
+                    }
+                    relay.saveTaskHook(draft)
+                    hookDraft = nil
+                    hookError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Button(copy.text("CANCEL")) {
+                    hookDraft = nil
+                    hookError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(RelayPalette.panel.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(RelayPalette.line, lineWidth: 1)
+        }
+    }
+
+    private func hookEventKey(_ event: RelayTaskHook.Event) -> String {
+        switch event {
+        case .completed: "hook · completed"
+        case .failed: "hook · failed"
+        case .waiting: "hook · waiting"
+        }
+    }
+
+    private func hookEventTint(_ event: RelayTaskHook.Event) -> SwiftUI.Color {
+        switch event {
+        case .completed: RelayPalette.success
+        case .failed: RelayPalette.danger
+        case .waiting: RelayPalette.warning
+        }
+    }
+
+    private var personaSettings: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(copy.text("Seat presets"))
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(copy.text("Named personas — an agent plus option overrides and extra rules. Pick them as members in dialogues and comparisons."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(RelayPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button(copy.text("ADD PRESET")) {
+                    personaDraft = RelayPersona(
+                        name: "",
+                        agentID: relay.agents.first(where: \.isAvailable)?.id ?? ""
+                    )
+                    personaError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                .disabled(relay.personas.count >= RelayPersonaStore.maxCount)
+            }
+
+            ForEach(relay.personas) { persona in
+                HStack(spacing: 10) {
+                    Text("☰ \(persona.name)")
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                    Text(relay.agents.first { $0.id == persona.agentID }?.name
+                        ?? persona.agentID)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                    if !persona.options.isEmpty {
+                        Text(persona.options
+                            .sorted { $0.key < $1.key }
+                            .map { "\($0.key)=\($0.value)" }
+                            .joined(separator: " "))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(RelayPalette.signal)
+                            .lineLimit(1)
+                    }
+                    if !persona.rules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(copy.text("rules"))
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.warning)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(RelayPalette.warning.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                    }
+                    Spacer()
+                    Button(copy.text("EDIT")) {
+                        personaDraft = persona
+                        personaError = nil
+                    }
+                    .buttonStyle(SettingsActionButtonStyle())
+                    Button(copy.text("DELETE")) {
+                        relay.deletePersona(id: persona.id)
+                    }
+                    .buttonStyle(SettingsActionButtonStyle())
+                }
+                .padding(.vertical, 4)
+            }
+
+            if let draft = personaDraft {
+                personaEditor(draft)
+            }
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+        }
+        .padding(.vertical, 22)
+    }
+
+    private func personaEditor(_ draft: RelayPersona) -> some View {
+        let agent = relay.agents.first { $0.id == draft.agentID }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                TextField(copy.text("Preset name"), text: Binding(
+                    get: { personaDraft?.name ?? "" },
+                    set: { personaDraft?.name = $0 }
+                ))
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(width: 200)
+                .background(RelayPalette.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                settingsMenu(
+                    agent?.name ?? copy.text("Agent"), width: 160
+                ) {
+                    ForEach(relay.agents.filter(\.isAvailable)) { candidate in
+                        Button(candidate.name) {
+                            personaDraft?.agentID = candidate.id
+                            personaDraft?.options = [:]
+                        }
+                    }
+                }
+                Spacer()
+            }
+
+            if let agent, !agent.options.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(agent.options, id: \.key) { option in
+                        settingsMenu(
+                            "\(option.label): \(personaDraft?.options[option.key] ?? copy.text("(default)"))",
+                            width: 190
+                        ) {
+                            Button(copy.text("(default)")) {
+                                personaDraft?.options[option.key] = nil
+                            }
+                            ForEach(option.values, id: \.self) { value in
+                                Button(value) {
+                                    personaDraft?.options[option.key] = value
+                                }
+                            }
+                        }
+                    }
+                    Spacer()
+                }
+            }
+
+            TextField(
+                copy.text("Extra rules prepended to this seat's prompts (optional)"),
+                text: Binding(
+                    get: { personaDraft?.rules ?? "" },
+                    set: { personaDraft?.rules = $0 }
+                ),
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 11, design: .monospaced))
+            .lineLimit(2...6)
+            .padding(9)
+            .background(RelayPalette.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if let personaError {
+                Text(copy.text(personaError))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(RelayPalette.danger)
+            }
+
+            HStack(spacing: 8) {
+                Button(copy.text("SAVE PRESET")) {
+                    guard var draft = personaDraft else { return }
+                    draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let reason = RelayPersonaStore.validationError(
+                        name: draft.name, rules: draft.rules
+                    ) {
+                        personaError = reason
+                        return
+                    }
+                    guard relay.agents.contains(where: { $0.id == draft.agentID }) else {
+                        personaError = "Pick an agent for this preset"
+                        return
+                    }
+                    relay.savePersona(draft)
+                    personaDraft = nil
+                    personaError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Button(copy.text("CANCEL")) {
+                    personaDraft = nil
+                    personaError = nil
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(RelayPalette.panel.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(RelayPalette.line, lineWidth: 1)
         }
     }
 

@@ -1,5 +1,55 @@
 import Foundation
 
+/// The project's git position at checkpoint-save time. Captured once, stored
+/// beside the frozen evidence, and only ever *compared* later — Relay never
+/// checks anything out.
+struct RelayDecisionBaseline: Codable, Equatable {
+    let projectPath: String
+    let commit: String
+    let dirty: Bool
+
+    enum Drift: Equatable {
+        case unchanged(dirtyNow: Bool)
+        case moved(currentCommit: String, dirtyNow: Bool)
+        case missing
+    }
+
+    /// Captures the current HEAD and dirty state; nil when the path is not a
+    /// git repository.
+    static func capture(projectPath: String) async -> RelayDecisionBaseline? {
+        guard let commit = try? await RelayWorktree.runGit(
+            ["-C", projectPath, "rev-parse", "HEAD"]
+        ) else {
+            return nil
+        }
+        let status = (try? await RelayWorktree.runGit(
+            ["-C", projectPath, "status", "--porcelain"]
+        )) ?? ""
+        return RelayDecisionBaseline(
+            projectPath: projectPath,
+            commit: commit,
+            dirty: !status.isEmpty
+        )
+    }
+
+    /// Explicit one-shot comparison against the repository's current HEAD.
+    func checkDrift() async -> Drift {
+        guard let current = try? await RelayWorktree.runGit(
+            ["-C", projectPath, "rev-parse", "HEAD"]
+        ) else {
+            return .missing
+        }
+        let status = (try? await RelayWorktree.runGit(
+            ["-C", projectPath, "status", "--porcelain"]
+        )) ?? ""
+        return current == commit
+            ? .unchanged(dirtyNow: !status.isEmpty)
+            : .moved(currentCommit: current, dirtyNow: !status.isEmpty)
+    }
+
+    var shortCommit: String { String(commit.prefix(8)) }
+}
+
 struct RelayDecisionCheckpoint: Identifiable, Codable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -7,16 +57,20 @@ struct RelayDecisionCheckpoint: Identifiable, Codable, Equatable {
     let id: UUID
     let savedAt: Date
     let decision: RelayResultArbitrationDecision
+    /// Optional git baseline; absent on pre-v0.100 records and non-git projects.
+    let baseline: RelayDecisionBaseline?
 
     init(
         id: UUID = UUID(),
         savedAt: Date,
-        decision: RelayResultArbitrationDecision
+        decision: RelayResultArbitrationDecision,
+        baseline: RelayDecisionBaseline? = nil
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.id = id
         self.savedAt = savedAt
         self.decision = decision
+        self.baseline = baseline
     }
 }
 
@@ -585,9 +639,12 @@ struct RelayDecisionArchive {
 
     func save(
         _ decision: RelayResultArbitrationDecision,
-        savedAt: Date = Date()
+        savedAt: Date = Date(),
+        baseline: RelayDecisionBaseline? = nil
     ) throws -> RelayDecisionCheckpoint {
-        let checkpoint = RelayDecisionCheckpoint(savedAt: savedAt, decision: decision)
+        let checkpoint = RelayDecisionCheckpoint(
+            savedAt: savedAt, decision: decision, baseline: baseline
+        )
         guard Self.isValid(checkpoint) else {
             throw RelayDecisionArchiveError.invalidCheckpoint
         }

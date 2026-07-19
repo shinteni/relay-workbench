@@ -415,7 +415,173 @@ struct AdapterCatalogTests {
             Issue.record("Combined declaration should be invalid")
             return
         }
-        #expect(reason.contains("cannot both"))
+        #expect(reason.contains("mutually exclusive"))
+    }
+
+    @Test
+    func loadsAcpManifestWithBuiltinAdapterAndSpecEnvironment() throws {
+        let root = try temporaryDirectory()
+        let acpAdapter = root.appendingPathComponent("acp-adapter")
+        let cli = root.appendingPathComponent("cli")
+        try executable(at: acpAdapter)
+        try executable(at: cli)
+        let manifest = root.appendingPathComponent("example.json")
+        try Data("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example ACP CLI",
+          "capabilities": ["session_resume", "interactive_input"],
+          "acp": {
+            "command": "RELAY_EXAMPLE_PATH",
+            "arguments": ["--acp"]
+          },
+          "requirements": [{
+            "name": "Example CLI",
+            "environment": "RELAY_EXAMPLE_PATH",
+            "candidates": ["cli"],
+            "version_arguments": ["--version"]
+          }]
+        }
+        """.utf8).write(to: manifest)
+
+        let agent = AdapterCatalog.loadManifest(
+            at: manifest,
+            home: root,
+            acpAdapter: acpAdapter
+        )
+
+        #expect(agent.health == .checking)
+        #expect(agent.adapterExecutablePath == acpAdapter.path)
+        #expect(agent.usesAcpRuntime)
+        #expect(!agent.usesGenericRuntime)
+        #expect(agent.registrationEnvironment["RELAY_EXAMPLE_PATH"] == cli.path)
+        #expect(agent.registrationEnvironment["RELAY_ACP_SPEC"] == manifest.path)
+        #expect(agent.registrationEnvironment["RELAY_GENERIC_SPEC"] == nil)
+    }
+
+    @Test
+    func acpManifestWithoutRuntimeIsMissing() throws {
+        let root = try temporaryDirectory()
+        let manifest = root.appendingPathComponent("example.json")
+        try Data("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example ACP CLI",
+          "capabilities": [],
+          "acp": {"command": "RELAY_EXAMPLE_PATH"},
+          "requirements": [{
+            "name": "Example CLI",
+            "environment": "RELAY_EXAMPLE_PATH",
+            "candidates": ["cli"],
+            "version_arguments": []
+          }]
+        }
+        """.utf8).write(to: manifest)
+
+        let agent = AdapterCatalog.loadManifest(at: manifest, home: root)
+
+        #expect(agent.health == .missing("ACP adapter runtime is unavailable"))
+        #expect(agent.usesAcpRuntime)
+    }
+
+    @Test
+    func rejectsAcpCombinedWithOtherRuntimes() throws {
+        let root = try temporaryDirectory()
+
+        func manifest(_ body: String) throws -> RelayAgent {
+            let url = root.appendingPathComponent("\(UUID().uuidString).json")
+            try Data(body.utf8).write(to: url)
+            return AdapterCatalog.loadManifest(at: url, home: root)
+        }
+
+        let withGeneric = try manifest("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example CLI",
+          "capabilities": [],
+          "generic": {"command": "RELAY_EXAMPLE_PATH"},
+          "acp": {"command": "RELAY_EXAMPLE_PATH"},
+          "requirements": [{
+            "name": "Example CLI",
+            "environment": "RELAY_EXAMPLE_PATH",
+            "candidates": ["cli"],
+            "version_arguments": []
+          }]
+        }
+        """)
+        guard case let .invalid(genericReason) = withGeneric.health else {
+            Issue.record("acp+generic should be invalid")
+            return
+        }
+        #expect(genericReason.contains("mutually exclusive"))
+
+        let withExecutable = try manifest("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example CLI",
+          "adapter_executable": "adapter",
+          "capabilities": [],
+          "acp": {"command": "RELAY_EXAMPLE_PATH"},
+          "requirements": [{
+            "name": "Example CLI",
+            "environment": "RELAY_EXAMPLE_PATH",
+            "candidates": ["cli"],
+            "version_arguments": []
+          }]
+        }
+        """)
+        guard case let .invalid(executableReason) = withExecutable.health else {
+            Issue.record("acp+adapter_executable should be invalid")
+            return
+        }
+        #expect(executableReason.contains("mutually exclusive"))
+    }
+
+    @Test
+    func defersAcpArgumentRulesToRuntimeValidator() throws {
+        let root = try temporaryDirectory()
+        let acpAdapter = root.appendingPathComponent("acp-adapter")
+        let cli = root.appendingPathComponent("cli")
+        try executable(at: acpAdapter)
+        try executable(at: cli)
+        let manifest = root.appendingPathComponent("example.json")
+        try Data("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example ACP CLI",
+          "capabilities": [],
+          "acp": {
+            "command": "RELAY_EXAMPLE_PATH",
+            "arguments": ["--resume", "{session}"]
+          },
+          "requirements": [{
+            "name": "Example CLI",
+            "environment": "RELAY_EXAMPLE_PATH",
+            "candidates": ["cli"],
+            "version_arguments": []
+          }]
+        }
+        """.utf8).write(to: manifest)
+
+        let agent = AdapterCatalog.loadManifest(
+            at: manifest,
+            home: root,
+            acpAdapter: acpAdapter
+        )
+
+        #expect(agent.health == .checking)
+        #expect(agent.usesAcpRuntime)
+        #expect(AdapterCatalog.lineCLIConfiguration(at: manifest) == nil)
     }
 
     @Test

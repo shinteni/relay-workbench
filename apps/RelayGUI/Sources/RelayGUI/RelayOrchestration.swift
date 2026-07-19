@@ -22,6 +22,16 @@ final class RelayCompareRun: ObservableObject, Identifiable {
     /// Run every member in its own detached git worktree (parallel
     /// implementation without file stomping).
     @Published var isolateWorktrees = false
+    /// Append the self-check appendix to the dispatched prompt.
+    @Published var selfCheck = RelaySelfCheck.isEnabled(
+        key: RelaySelfCheck.compareDefaultsKey
+    ) {
+        didSet {
+            RelaySelfCheck.setEnabled(
+                selfCheck, key: RelaySelfCheck.compareDefaultsKey
+            )
+        }
+    }
     @Published private(set) var setupHint: String?
     @Published private(set) var diffStats: [String: String] = [:]
     @Published private(set) var adoptMessages: [String: String] = [:]
@@ -58,13 +68,19 @@ final class RelayCompareRun: ObservableObject, Identifiable {
     func start() {
         guard case .setup = phase, let relay else { return }
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let chosen = selection.compactMap { id in
-            relay.agents.first { $0.id == id && $0.isAvailable }
+        let chosen = selection.compactMap { id -> RelayMemberResolution? in
+            guard let member = relay.resolveMember(id),
+                  relay.agents.first(where: { $0.id == member.agentID })?
+                      .isAvailable == true else { return nil }
+            return member
         }
         guard !trimmed.isEmpty, chosen.count >= 2 else { return }
+        let dispatched = RelaySelfCheck.apply(
+            trimmed, enabled: selfCheck, language: relay.language
+        )
         phase = .running
         engine = Task { [weak self] in
-            await self?.run(chosen: chosen, prompt: trimmed)
+            await self?.run(chosen: chosen, prompt: dispatched)
         }
     }
 
@@ -117,6 +133,118 @@ final class RelayCompareRun: ObservableObject, Identifiable {
                     ? copy.text("No changes to adopt.")
                     : copy.text("Adopted into the project: ⟨STAT⟩")
                         .replacingOccurrences(of: "⟨STAT⟩", with: stat)
+            } catch {
+                self?.adoptMessages[memberID] =
+                    "\(copy.text("Failed:")) \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// A parsed worktree patch awaiting an explicit per-hunk selection.
+    struct HunkSelectionPlan {
+        let memberID: String
+        let memberName: String
+        let files: [RelayDiffPatch.FileDiff]
+        var selected: Set<RelayDiffPatch.Selection>
+        var expanded: Set<Int> = []
+
+        var selectedHunkCount: Int { selected.count }
+        var selectedFileCount: Int { Set(selected.map(\.file)).count }
+    }
+
+    @Published var hunkSelection: HunkSelectionPlan?
+
+    /// Parses one member's worktree patch and opens the selective adoption
+    /// panel with everything preselected; the user then unpicks hunks.
+    func beginSelectiveAdoption(of memberID: String) {
+        guard let relay,
+              hunkSelection == nil,
+              let member = members.first(where: { $0.id == memberID }),
+              let worktree = member.worktreePath,
+              let base = member.baseCommit else { return }
+        let copy = RelayCopy(language: relay.language)
+        let name = member.agentName
+        Task { [weak self] in
+            do {
+                let patch = try await RelayWorktree.changesPatch(
+                    worktree: worktree, base: base
+                )
+                let files = RelayDiffPatch.parse(patch)
+                guard !files.isEmpty else {
+                    self?.adoptMessages[memberID] = copy.text("No changes to adopt.")
+                    return
+                }
+                self?.hunkSelection = HunkSelectionPlan(
+                    memberID: memberID,
+                    memberName: name,
+                    files: files,
+                    selected: RelayDiffPatch.selectAll(files)
+                )
+            } catch {
+                self?.adoptMessages[memberID] =
+                    "\(copy.text("Failed:")) \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func toggleHunkSelection(_ selection: RelayDiffPatch.Selection) {
+        guard var plan = hunkSelection else { return }
+        if plan.selected.contains(selection) {
+            plan.selected.remove(selection)
+        } else {
+            plan.selected.insert(selection)
+        }
+        hunkSelection = plan
+    }
+
+    func setFileSelection(_ file: RelayDiffPatch.FileDiff, enabled: Bool) {
+        guard var plan = hunkSelection, !file.isBinary else { return }
+        let selections = file.hunks.isEmpty
+            ? [RelayDiffPatch.Selection(file: file.id, hunk: nil)]
+            : file.hunks.map { RelayDiffPatch.Selection(file: file.id, hunk: $0.id) }
+        for selection in selections {
+            if enabled {
+                plan.selected.insert(selection)
+            } else {
+                plan.selected.remove(selection)
+            }
+        }
+        hunkSelection = plan
+    }
+
+    func toggleFileExpansion(_ fileID: Int) {
+        guard var plan = hunkSelection else { return }
+        if plan.expanded.contains(fileID) {
+            plan.expanded.remove(fileID)
+        } else {
+            plan.expanded.insert(fileID)
+        }
+        hunkSelection = plan
+    }
+
+    func cancelSelectiveAdoption() {
+        hunkSelection = nil
+    }
+
+    /// Assembles the selected hunks into a patch and applies it to the project.
+    func adoptSelectedHunks() {
+        guard let relay,
+              let plan = hunkSelection,
+              let project = relayCWD else { return }
+        let copy = RelayCopy(language: relay.language)
+        let patch = RelayDiffPatch.assemble(files: plan.files, selected: plan.selected)
+        guard !patch.isEmpty else { return }
+        let memberID = plan.memberID
+        let summary = copy.text("Adopted ⟨HUNKS⟩ hunk(s) across ⟨FILES⟩ file(s).")
+            .replacingOccurrences(of: "⟨HUNKS⟩", with: String(plan.selectedHunkCount))
+            .replacingOccurrences(of: "⟨FILES⟩", with: String(plan.selectedFileCount))
+        adoptMessages[memberID] = copy.text("Applying…")
+        hunkSelection = nil
+        let resolved = RelayTerminalLauncher.resolvedWorkingDirectory(project)
+        Task { [weak self] in
+            do {
+                try await RelayWorktree.applyPatch(patch, into: resolved)
+                self?.adoptMessages[memberID] = summary
             } catch {
                 self?.adoptMessages[memberID] =
                     "\(copy.text("Failed:")) \(error.localizedDescription)"
@@ -186,7 +314,7 @@ final class RelayCompareRun: ObservableObject, Identifiable {
         return run
     }
 
-    private func run(chosen: [RelayAgent], prompt: String) async {
+    private func run(chosen: [RelayMemberResolution], prompt: String) async {
         guard let relay else { return }
         relayCWD = relay.defaultWorkingDirectory
         let copy = RelayCopy(language: relay.language)
@@ -205,7 +333,7 @@ final class RelayCompareRun: ObservableObject, Identifiable {
         groupID = group
         var created: [Member] = []
         var startFailure: String?
-        for (index, agent) in chosen.enumerated() {
+        for (index, member) in chosen.enumerated() {
             do {
                 var worktreePath: String?
                 var baseCommit: String?
@@ -216,7 +344,7 @@ final class RelayCompareRun: ObservableObject, Identifiable {
                             String(id.uuidString.prefix(8)), isDirectory: true
                         )
                         .appendingPathComponent(
-                            "\(index + 1)-\(agent.id)", isDirectory: true
+                            "\(index + 1)-\(member.agentID)", isDirectory: true
                         )
                     baseCommit = try await RelayWorktree.create(
                         project: project, destination: destination
@@ -225,11 +353,14 @@ final class RelayCompareRun: ObservableObject, Identifiable {
                     overrideCWD = destination.path
                 }
                 let taskID = try await relay.startGroupTask(
-                    agentID: agent.id, prompt: prompt, group: group,
-                    cwd: overrideCWD
+                    agentID: member.agentID,
+                    prompt: RelayPersonaStore.applyRules(member.rules, to: prompt),
+                    group: group,
+                    cwd: overrideCWD,
+                    optionOverrides: member.optionOverrides
                 )
                 created.append(Member(
-                    id: taskID, agentID: agent.id, agentName: agent.name,
+                    id: taskID, agentID: member.agentID, agentName: member.displayName,
                     worktreePath: worktreePath, baseCommit: baseCommit
                 ))
                 members = created
@@ -319,6 +450,20 @@ final class RelayChainRun: ObservableObject, Identifiable {
     @Published var sequence: [String]
     @Published var prompt = ""
     @Published var note = ""
+    /// Append the self-check appendix to the dispatched prompt.
+    @Published var selfCheck = RelaySelfCheck.isEnabled(
+        key: RelaySelfCheck.chainDefaultsKey
+    ) {
+        didSet {
+            RelaySelfCheck.setEnabled(
+                selfCheck, key: RelaySelfCheck.chainDefaultsKey
+            )
+        }
+    }
+    /// Per-step fork options when this run was branched off another chain.
+    private(set) var forkOverrides: [Int: [String: String]] = [:]
+    /// Human summary shown in a forked window (which steps carry memory).
+    @Published private(set) var forkNotice: String?
     /// Follow-ups queued while a round is still running; sent automatically.
     @Published private(set) var queuedFollowUps: [String] = []
     @Published private(set) var steps: [Step] = []
@@ -358,6 +503,9 @@ final class RelayChainRun: ObservableObject, Identifiable {
         guard case .setup = phase, let relay else { return }
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, sequence.count >= 2 else { return }
+        let dispatched = RelaySelfCheck.apply(
+            trimmed, enabled: selfCheck, language: relay.language
+        )
         phase = .running
         let sequence = sequence
         let note = note
@@ -365,7 +513,8 @@ final class RelayChainRun: ObservableObject, Identifiable {
             guard let self else { return }
             do {
                 self.chainID = try await relay.startChainRun(
-                    sequence: sequence, prompt: trimmed, note: note
+                    sequence: sequence, prompt: dispatched, note: note,
+                    stepOverrides: forkOverrides
                 )
             } catch {
                 self.phase = .failed(error.localizedDescription)
@@ -431,6 +580,34 @@ final class RelayChainRun: ObservableObject, Identifiable {
 
     func clearQueuedFollowUps() {
         queuedFollowUps.removeAll()
+    }
+
+    /// Branches this completed chain into a new run: steps whose adapter
+    /// supports session forking continue a copy of their session; the rest
+    /// start fresh. This run and its sessions stay untouched.
+    func makeFork(prompt: String) -> RelayChainRun? {
+        guard case .completed = phase, let relay, let chainID else { return nil }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let ordered = relay.tasks
+            .filter { $0.compareGroup == chainID }
+            .sorted { ($0.chainStep ?? 0) < ($1.chainStep ?? 0) }
+        guard ordered.count >= 2 else { return nil }
+        let plan = RelayChainFork.plan(
+            steps: ordered.map { ($0.adapterID, $0.sessionID) },
+            capabilities: { id in
+                relay.agents.first { $0.id == id }?.capabilities ?? []
+            }
+        )
+        let copy = RelayCopy(language: relay.language)
+        let fork = RelayChainRun(
+            relay: relay, preselected: ordered.map(\.adapterID)
+        )
+        fork.prompt = trimmed
+        fork.note = note
+        fork.forkOverrides = RelayChainFork.overrides(for: plan)
+        fork.forkNotice = RelayChainFork.notice(plan, copy: copy)
+        return fork
     }
 
     private func drainQueueIfNeeded() {
@@ -633,6 +810,7 @@ struct RelayCompareWindow: View {
     @ObservedObject var store: RelayTerminalStore
     @ObservedObject var run: RelayCompareRun
     let agents: [RelayAgent]
+    var personas: [RelayPersona] = []
     let frame: CGRect
     let canvasSize: CGSize
     let focused: Bool
@@ -696,6 +874,8 @@ struct RelayCompareWindow: View {
         } content: {
             if case .setup = run.phase {
                 setupForm
+            } else if run.hunkSelection != nil {
+                hunkSelectionPanel
             } else {
                 columns
             }
@@ -732,6 +912,35 @@ struct RelayCompareWindow: View {
                 }
                 .buttonStyle(.plain)
             }
+            ForEach(personas.filter { persona in
+                agents.first { $0.id == persona.agentID }?.isAvailable == true
+            }) { persona in
+                let memberID = RelayPersonaStore.memberID(for: persona)
+                Button {
+                    run.toggle(memberID)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(run.selection.contains(memberID) ? "▣" : "☐")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(
+                                run.selection.contains(memberID)
+                                    ? RelayPalette.signal : RelayPalette.muted
+                            )
+                        Circle()
+                            .fill(agent(persona.agentID)?.accent ?? RelayPalette.signal)
+                            .frame(width: 5, height: 5)
+                        Text("☰ \(persona.name)")
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                        Text(agent(persona.agentID)?.name ?? persona.agentID)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
 
             Button {
                 run.isolateWorktrees.toggle()
@@ -755,6 +964,25 @@ struct RelayCompareWindow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            Button {
+                run.selfCheck.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(run.selfCheck ? "▣" : "☐")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            run.selfCheck ? RelayPalette.success : RelayPalette.muted
+                        )
+                    Text("✓ \(copy.text("Self-check before delivering"))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(copy.text("Appends a visible verification instruction to the prompt"))
 
             if let hint = run.setupHint {
                 Text(hint)
@@ -878,6 +1106,11 @@ struct RelayCompareWindow: View {
                     if status?.isTerminal == true,
                        run.diffStats[member.id]?.isEmpty == false,
                        run.adoptMessages[member.id] == nil {
+                        Button(copy.text("PICK HUNKS…")) {
+                            run.beginSelectiveAdoption(of: member.id)
+                        }
+                        .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+                        .help(copy.text("Choose files and hunks to adopt from this worktree"))
                         Button(copy.text("ADOPT THIS VERSION")) {
                             run.adoptChanges(of: member.id)
                         }
@@ -913,6 +1146,169 @@ struct RelayCompareWindow: View {
                 .fill(RelayPalette.line)
                 .frame(width: 1)
         }
+    }
+
+    @ViewBuilder
+    private var hunkSelectionPanel: some View {
+        if let plan = run.hunkSelection {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Text("⛏ \(copy.text("PICK HUNKS TO ADOPT")) · \(plan.memberName.uppercased())")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .tracking(1.2)
+                        .foregroundStyle(RelayPalette.signal)
+                    Spacer()
+                    Text(copy.text("⟨HUNKS⟩ hunk(s) / ⟨FILES⟩ file(s) selected")
+                        .replacingOccurrences(of: "⟨HUNKS⟩", with: String(plan.selectedHunkCount))
+                        .replacingOccurrences(of: "⟨FILES⟩", with: String(plan.selectedFileCount)))
+                        .font(.system(size: 9, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(RelayPalette.muted)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(plan.files) { file in
+                            hunkFileRow(file, plan: plan)
+                        }
+                    }
+                    .padding(.bottom, 6)
+                }
+                HStack(spacing: 8) {
+                    Button(copy.text("ADOPT SELECTED")) {
+                        run.adoptSelectedHunks()
+                    }
+                    .buttonStyle(ConsoleButtonStyle(
+                        tint: RelayPalette.success, prominent: true
+                    ))
+                    .disabled(plan.selected.isEmpty)
+                    .help(copy.text("Apply only the checked hunks onto the project"))
+                    Button(copy.text("CANCEL")) {
+                        run.cancelSelectiveAdoption()
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                    Spacer()
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    private func hunkFileRow(
+        _ file: RelayDiffPatch.FileDiff, plan: RelayCompareRun.HunkSelectionPlan
+    ) -> some View {
+        let fileSelections = file.hunks.isEmpty
+            ? [RelayDiffPatch.Selection(file: file.id, hunk: nil)]
+            : file.hunks.map { RelayDiffPatch.Selection(file: file.id, hunk: $0.id) }
+        let selectedCount = fileSelections.filter { plan.selected.contains($0) }.count
+        let mark = file.isBinary
+            ? "⊘" : selectedCount == 0
+                ? "☐" : selectedCount == fileSelections.count ? "▣" : "◪"
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 7) {
+                Button {
+                    run.setFileSelection(file, enabled: selectedCount < fileSelections.count)
+                } label: {
+                    Text(mark)
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            file.isBinary
+                                ? RelayPalette.muted
+                                : selectedCount > 0 ? RelayPalette.success : RelayPalette.muted
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(file.isBinary)
+                Button {
+                    run.toggleFileExpansion(file.id)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(plan.expanded.contains(file.id) ? "▾" : "▸")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted)
+                        Text(file.displayPath)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if file.isBinary {
+                            Text(copy.text("binary — not adoptable via patch"))
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundStyle(RelayPalette.warning)
+                        } else if file.hunks.isEmpty {
+                            Text(copy.text("metadata only"))
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .foregroundStyle(RelayPalette.muted)
+                        } else {
+                            Text("+\(file.hunks.reduce(0) { $0 + $1.added }) −\(file.hunks.reduce(0) { $0 + $1.removed })")
+                                .font(.system(size: 8.5, design: .monospaced))
+                                .monospacedDigit()
+                                .foregroundStyle(RelayPalette.muted)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(file.hunks.isEmpty && !plan.expanded.contains(file.id) && file.isBinary)
+            }
+            if plan.expanded.contains(file.id) {
+                ForEach(file.hunks) { hunk in
+                    hunkRow(hunk, file: file, plan: plan)
+                }
+            }
+        }
+        .padding(8)
+        .background(RelayPalette.panel.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(RelayPalette.line, lineWidth: 1)
+        }
+    }
+
+    private func hunkRow(
+        _ hunk: RelayDiffPatch.Hunk,
+        file: RelayDiffPatch.FileDiff,
+        plan: RelayCompareRun.HunkSelectionPlan
+    ) -> some View {
+        let selection = RelayDiffPatch.Selection(file: file.id, hunk: hunk.id)
+        let isSelected = plan.selected.contains(selection)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Button {
+                    run.toggleHunkSelection(selection)
+                } label: {
+                    Text(isSelected ? "▣" : "☐")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            isSelected ? RelayPalette.success : RelayPalette.muted
+                        )
+                }
+                .buttonStyle(.plain)
+                Text(hunk.headerLine(newStart: hunk.newStart))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(RelayPalette.signal)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                Text("+\(hunk.added) −\(hunk.removed)")
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayPalette.muted)
+            }
+            ScrollView {
+                Text(hunk.lines.joined(separator: "\n"))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(RelayPalette.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 110)
+            .padding(6)
+            .background(RelayPalette.raised.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .padding(.leading, 22)
     }
 }
 
@@ -1032,6 +1428,25 @@ struct RelayChainWindow: View {
                 Spacer()
             }
 
+            Button {
+                run.selfCheck.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(run.selfCheck ? "▣" : "☐")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            run.selfCheck ? RelayPalette.success : RelayPalette.muted
+                        )
+                    Text("✓ \(copy.text("Self-check before delivering"))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(copy.text("Appends a visible verification instruction to the prompt"))
+
             TextField(copy.text("Prompt for the first step"), text: $run.prompt, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11.5, design: .monospaced))
@@ -1086,6 +1501,13 @@ struct RelayChainWindow: View {
             Rectangle()
                 .fill(RelayPalette.line)
                 .frame(height: 1)
+            if let notice = run.forkNotice {
+                Text(notice)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(RelayPalette.mix)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 6)
+            }
             Text(run.statusLabel(copy: copy))
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(statusColor)
@@ -1131,6 +1553,15 @@ struct RelayChainWindow: View {
                 .disabled(
                     followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
+                Button("⑂ \(copy.text("FORK"))") {
+                    forkChain()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix))
+                .disabled(
+                    run.isRunning
+                        || followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                .help(copy.text("Branch this chain into a new window; forkable steps continue a copy of their session, the original stays untouched"))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -1149,6 +1580,14 @@ struct RelayChainWindow: View {
         guard !text.isEmpty else { return }
         followUpDraft = ""
         run.submitFollowUp(text)
+    }
+
+    private func forkChain() {
+        let text = followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, let fork = run.makeFork(prompt: text) else { return }
+        followUpDraft = ""
+        store.openChain(fork)
+        fork.start()
     }
 
     private var statusColor: SwiftUI.Color {

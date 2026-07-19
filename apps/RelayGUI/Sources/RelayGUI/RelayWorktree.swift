@@ -81,22 +81,32 @@ enum RelayWorktree {
         return count > 0 ? "+\(count) new file(s)" : ""
     }
 
+    /// Full patch of the worktree versus its base, with untracked files
+    /// staged (intent-to-add) so they appear in the diff without committing.
+    static func changesPatch(worktree: String, base: String) async throws -> String {
+        _ = try? await runGit(["-C", worktree, "add", "-A", "-N"])
+        return try await runGit(["-C", worktree, "diff", base])
+    }
+
+    /// Applies an already-assembled patch onto the project tree.
+    static func applyPatch(_ patch: String, into project: String) async throws {
+        let payload = patch.hasSuffix("\n") ? patch : patch + "\n"
+        try await runGit(
+            ["-C", project, "apply", "--whitespace=nowarn"],
+            stdin: Data(payload.utf8)
+        )
+    }
+
     /// Applies the worktree's changes (vs. base) onto the project tree.
     /// Returns a human-readable summary; throws when the patch cannot apply.
     static func adopt(
         worktree: String, base: String, into project: String
     ) async throws -> String {
-        // Stage untracked files so they are part of the diff, without
-        // committing anything in the worktree.
-        _ = try? await runGit(["-C", worktree, "add", "-A", "-N"])
-        let patch = try await runGit(["-C", worktree, "diff", base])
+        let patch = try await changesPatch(worktree: worktree, base: base)
         guard !patch.isEmpty else {
             return ""
         }
-        try await runGit(
-            ["-C", project, "apply", "--whitespace=nowarn"],
-            stdin: Data((patch + "\n").utf8)
-        )
+        try await applyPatch(patch, into: project)
         return (try? await runGit([
             "-C", worktree, "diff", "--shortstat", base,
         ])) ?? ""

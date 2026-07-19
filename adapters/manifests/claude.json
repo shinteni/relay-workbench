@@ -4,7 +4,7 @@
   "name": "Claude",
   "detail": "Anthropic Claude CLI",
   "adapter_executable": "../bin/claude-adapter",
-  "capabilities": ["session_resume"],
+  "capabilities": ["session_resume", "session_fork"],
   "options": [
     {
       "key": "claude_model",

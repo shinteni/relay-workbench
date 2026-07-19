@@ -66,11 +66,15 @@ fn run() -> Result<()> {
     {
         arguments.extend([OsString::from("--effort"), OsString::from(effort)]);
     }
-    if request.session_id.is_some() {
-        arguments.extend([OsString::from("--resume"), OsString::from(&session_id)]);
-    } else {
-        arguments.extend([OsString::from("--session-id"), OsString::from(&session_id)]);
-    }
+    arguments.extend(session_arguments(
+        &session_id,
+        request.session_id.is_some(),
+        request
+            .options
+            .get("relay_fork_from")
+            .map(String::as_str)
+            .filter(|value| !value.is_empty()),
+    ));
     emit(
         &request,
         TaskStatus::Running,
@@ -122,6 +126,29 @@ fn run() -> Result<()> {
         )?;
         Ok(())
     }
+}
+
+/// Session arguments for the three flows: resume an existing session, fork a
+/// foreign session into this task's own session ID, or start fresh. Forking
+/// only applies to first turns — continued turns already own their session.
+fn session_arguments(
+    session_id: &str,
+    resume: bool,
+    fork_from: Option<&str>,
+) -> Vec<OsString> {
+    if resume {
+        return vec![OsString::from("--resume"), OsString::from(session_id)];
+    }
+    if let Some(fork_from) = fork_from {
+        return vec![
+            OsString::from("--resume"),
+            OsString::from(fork_from),
+            OsString::from("--fork-session"),
+            OsString::from("--session-id"),
+            OsString::from(session_id),
+        ];
+    }
+    vec![OsString::from("--session-id"), OsString::from(session_id)]
 }
 
 fn handle_claude_event(
@@ -215,5 +242,37 @@ fn handle_claude_event(
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_wins_over_fork_and_uses_the_existing_session() {
+        assert_eq!(
+            session_arguments("sess-1", true, Some("origin")),
+            ["--resume", "sess-1"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn first_turn_fork_resumes_origin_into_a_new_session() {
+        assert_eq!(
+            session_arguments("task-9", false, Some("origin-7")),
+            [
+                "--resume", "origin-7", "--fork-session", "--session-id", "task-9",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn plain_first_turns_start_their_own_session() {
+        assert_eq!(
+            session_arguments("task-9", false, None),
+            ["--session-id", "task-9"].map(OsString::from)
+        );
     }
 }

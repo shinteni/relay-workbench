@@ -41,7 +41,7 @@ enum RelayTerminalLauncher {
                 return Spec(executable: binary, arguments: [])
             }
             let fallback = agent.registrationEnvironment
-                .filter { $0.key != "RELAY_GENERIC_SPEC" }
+                .filter { $0.key != "RELAY_GENERIC_SPEC" && $0.key != "RELAY_ACP_SPEC" }
                 .values
                 .sorted()
                 .first
@@ -276,15 +276,27 @@ struct RelayResultArbitrationDecision: Identifiable, Codable, Equatable {
     let id: UUID
     let receipt: RelayResultArbitrationReceipt
     let result: RelayResultSnapshot
+    /// Parsed fields of a structured daemon verdict. `result.text` always
+    /// keeps the judge's raw reply verbatim; these are display-layer extras
+    /// and stay nil for terminal arbitrations and legacy records.
+    let structuredVerdict: String?
+    let structuredRationale: String?
+    let structuredConfidence: String?
 
     init(
         id: UUID = UUID(),
         receipt: RelayResultArbitrationReceipt,
-        result: RelayResultSnapshot
+        result: RelayResultSnapshot,
+        structuredVerdict: String? = nil,
+        structuredRationale: String? = nil,
+        structuredConfidence: String? = nil
     ) {
         self.id = id
         self.receipt = receipt
         self.result = result
+        self.structuredVerdict = structuredVerdict
+        self.structuredRationale = structuredRationale
+        self.structuredConfidence = structuredConfidence
     }
 }
 
@@ -538,6 +550,38 @@ enum RelayResultArbitration {
         snapshots: [RelayResultSnapshot]
     ) -> String? {
         plan(instruction: instruction, snapshots: snapshots)?.payload
+    }
+
+    /// Builds the sealed decision for a one-click daemon arbitration. The
+    /// receipt's target and the result snapshot share one identity — the
+    /// archive validator requires `receipt.targetID == result.id`, so two
+    /// independent UUIDs would make the checkpoint unsaveable.
+    static func daemonDecision(
+        confluence: RelayResultConfluence,
+        plan: RelayResultArbitrationPlan,
+        parentCheckpointID: UUID?,
+        judgeName: String,
+        reply: String
+    ) -> RelayResultArbitrationDecision {
+        let parsed = RelayArbitrationVerdict.parse(reply)
+        let resultID = UUID()
+        return RelayResultArbitrationDecision(
+            receipt: RelayResultArbitrationReceipt(
+                confluence: confluence,
+                plan: plan,
+                targetID: resultID,
+                parentCheckpointID: parentCheckpointID
+            ),
+            result: RelayResultSnapshot(
+                id: resultID,
+                agentName: judgeName,
+                projectName: confluence.snapshots.first?.projectName ?? "",
+                text: reply
+            ),
+            structuredVerdict: parsed.isStructured ? parsed.verdict : nil,
+            structuredRationale: parsed.isStructured ? parsed.rationale : nil,
+            structuredConfidence: parsed.isStructured ? parsed.confidence : nil
+        )
     }
 
     static func plan(
@@ -2212,7 +2256,8 @@ final class RelayTerminalStore: ObservableObject {
             guard let relay else { return }
             do {
                 let taskID = try await relay.startDialogueTask(
-                    agentID: judge.id, prompt: plan.payload
+                    agentID: judge.id,
+                    prompt: RelayArbitrationVerdict.payloadForDaemonJudge(plan.payload)
                 )
                 self?.daemonArbitrationTaskID = taskID
                 while true {
@@ -2227,26 +2272,18 @@ final class RelayTerminalStore: ObservableObject {
                     return
                 }
                 let output = await relay.outputItems(taskID: taskID)
-                let verdict = ThreadCatalog.lastTurnAnswer(output)
+                let reply = ThreadCatalog.lastTurnAnswer(output)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let self, !verdict.isEmpty else {
+                guard let self, !reply.isEmpty else {
                     self?.failDaemonArbitration("empty verdict")
                     return
                 }
-                let receipt = RelayResultArbitrationReceipt(
+                self.resultArbitrationDecision = RelayResultArbitration.daemonDecision(
                     confluence: confluence,
                     plan: plan,
-                    targetID: UUID(),
-                    parentCheckpointID: parentCheckpointID
-                )
-                self.resultArbitrationDecision = RelayResultArbitrationDecision(
-                    receipt: receipt,
-                    result: RelayResultSnapshot(
-                        id: UUID(),
-                        agentName: judge.name,
-                        projectName: confluence.snapshots.first?.projectName ?? "",
-                        text: verdict
-                    )
+                    parentCheckpointID: parentCheckpointID,
+                    judgeName: judge.name,
+                    reply: reply
                 )
                 self.resultConfluence = nil
                 self.resultConfluenceReplayCheckpoint = nil
@@ -2298,7 +2335,9 @@ final class RelayTerminalStore: ObservableObject {
     }
 
     @discardableResult
-    func saveResultArbitrationDecision() -> Bool {
+    func saveResultArbitrationDecision(
+        baseline: RelayDecisionBaseline? = nil
+    ) -> Bool {
         guard let decision = resultArbitrationDecision else { return false }
         if let existing = savedDecisionCheckpoints.first(where: {
             $0.decision.id == decision.id
@@ -2307,7 +2346,7 @@ final class RelayTerminalStore: ObservableObject {
             return true
         }
         do {
-            let checkpoint = try decisionArchive.save(decision)
+            let checkpoint = try decisionArchive.save(decision, baseline: baseline)
             liveDecisionCheckpointID = checkpoint.id
             reloadDecisionArchive()
             noticeKey = "Decision checkpoint saved locally."
@@ -3849,6 +3888,7 @@ struct RelayTerminalHost: NSViewRepresentable {
 struct RelayTerminalWorkspace: View {
     @ObservedObject var store: RelayTerminalStore
     let agents: [RelayAgent]
+    var personas: [RelayPersona] = []
     let onRestoreDesk: () -> Void
     @Environment(\.relayLanguage) private var language
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3879,6 +3919,7 @@ struct RelayTerminalWorkspace: View {
                             store: store,
                             run: run,
                             agents: agents,
+                            personas: personas,
                             frame: store.frame(for: run.id),
                             canvasSize: proxy.size,
                             focused: store.focusedID == run.id
@@ -3888,6 +3929,7 @@ struct RelayTerminalWorkspace: View {
                             store: store,
                             run: run,
                             agents: agents,
+                            personas: personas,
                             frame: store.frame(for: run.id),
                             canvasSize: proxy.size,
                             focused: store.focusedID == run.id

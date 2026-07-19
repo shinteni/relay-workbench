@@ -3,7 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
-use cli_adapters::{ChildLine, emit, read_request, resolve_cli, run_cli};
+use cli_adapters::spec::{
+    ManifestOption, ManifestRequirement as GenericRequirement, resolve_options,
+    validate_argument_list, validate_command_key, validate_options, validate_requirements,
+};
+use cli_adapters::{ChildLine, emit, read_request, run_cli};
 use relay_protocol::{TaskOutputKind, TaskStatus};
 use serde::Deserialize;
 
@@ -26,15 +30,6 @@ struct GenericManifest {
 }
 
 #[derive(Debug, Deserialize)]
-struct ManifestOption {
-    key: String,
-    #[serde(default)]
-    values: Vec<String>,
-    #[serde(default)]
-    default: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct GenericSpec {
     command: String,
     #[serde(default)]
@@ -47,13 +42,6 @@ struct GenericSpec {
     output: Option<String>,
     #[serde(default)]
     text_paths: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GenericRequirement {
-    environment: String,
-    #[serde(default)]
-    candidates: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -222,111 +210,8 @@ fn validate_manifest(manifest: &GenericManifest) -> Result<()> {
     validate_spec(&manifest.generic, &manifest.options)
 }
 
-fn validate_requirements(requirements: &[GenericRequirement], command: &str) -> Result<()> {
-    if requirements.len() > 15 {
-        bail!("generic adapters allow at most 15 requirements");
-    }
-    let mut environments = std::collections::BTreeSet::new();
-    for requirement in requirements {
-        if !requirement.environment.starts_with("RELAY_")
-            || requirement.environment.len() > 64
-            || !requirement
-                .environment
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-            || !environments.insert(requirement.environment.as_str())
-        {
-            bail!(
-                "generic requirement environment is invalid: {}",
-                requirement.environment
-            );
-        }
-        if requirement.candidates.is_empty()
-            || requirement.candidates.len() > 16
-            || requirement
-                .candidates
-                .iter()
-                .any(|candidate| candidate.is_empty() || candidate.len() > 1024)
-        {
-            bail!(
-                "generic requirement candidates are invalid: {}",
-                requirement.environment
-            );
-        }
-    }
-    if !environments.contains(command) {
-        bail!("generic command must match a requirement environment key: {command}");
-    }
-    Ok(())
-}
-
-fn validate_options(options: &[ManifestOption]) -> Result<()> {
-    if options.len() > 8 {
-        bail!("a manifest allows at most 8 options");
-    }
-    let mut keys = std::collections::BTreeSet::new();
-    for option in options {
-        if option.key.is_empty()
-            || option.key.len() > 32
-            || option.key.starts_with("relay")
-            || !option.key.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-            })
-        {
-            bail!("manifest option key is invalid: {}", option.key);
-        }
-        if !keys.insert(&option.key) {
-            bail!("manifest option key is duplicated: {}", option.key);
-        }
-        if option.values.is_empty()
-            || option.values.len() > 24
-            || option.values.iter().any(|value| {
-                value.is_empty() || value.len() > 64 || value.chars().any(char::is_control)
-            })
-        {
-            bail!("manifest option values are invalid: {}", option.key);
-        }
-        if let Some(default) = &option.default
-            && !option.values.contains(default)
-        {
-            bail!(
-                "manifest option default is not among its values: {}",
-                option.key
-            );
-        }
-    }
-    Ok(())
-}
-
-fn resolve_options(
-    options: &[ManifestOption],
-    provided: &std::collections::BTreeMap<String, String>,
-) -> Vec<(String, String)> {
-    options
-        .iter()
-        .map(|option| {
-            let value = provided
-                .get(&option.key)
-                .or(option.default.as_ref())
-                .unwrap_or(&option.values[0])
-                .clone();
-            (option.key.clone(), value)
-        })
-        .collect()
-}
-
 fn validate_spec(spec: &GenericSpec, options: &[ManifestOption]) -> Result<()> {
-    if !spec.command.starts_with("RELAY_")
-        || !spec
-            .command
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    {
-        bail!(
-            "generic command must name a RELAY_ environment key: {}",
-            spec.command
-        );
-    }
+    validate_command_key(&spec.command)?;
     match spec.output.as_deref() {
         None | Some("text") => {
             if !spec.text_paths.is_empty() {
@@ -356,9 +241,7 @@ fn validate_spec(spec: &GenericSpec, options: &[ManifestOption]) -> Result<()> {
         spec.resume_arguments.as_deref().unwrap_or_default(),
     ];
     for arguments in argument_lists {
-        if arguments.len() > 32 || arguments.iter().any(|argument| argument.len() > 512) {
-            bail!("generic arguments are invalid");
-        }
+        validate_argument_list(arguments)?;
         for argument in arguments {
             validate_placeholders(argument, options)?;
         }
@@ -375,69 +258,15 @@ fn validate_spec(spec: &GenericSpec, options: &[ManifestOption]) -> Result<()> {
 }
 
 fn validate_placeholders(argument: &str, options: &[ManifestOption]) -> Result<()> {
-    for token in placeholders(argument) {
-        if token == "session" || token == "cwd" {
-            continue;
-        }
-        if let Some(key) = token.strip_prefix("option:") {
-            if options.iter().any(|option| option.key == key) {
-                continue;
-            }
-            bail!(
-                "placeholder {{{token}}} references an undeclared option in argument: {argument}"
-            );
-        }
-        bail!("unknown placeholder {{{token}}} in argument: {argument}");
-    }
-    Ok(())
-}
-
-fn placeholders(value: &str) -> impl Iterator<Item = &str> {
-    value.split('{').skip(1).filter_map(|part| {
-        let token = part.split('}').next()?;
-        (part.len() > token.len()
-            && !token.is_empty()
-            && token.bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b'_' | b'-' | b':')
-            }))
-        .then_some(token)
-    })
+    cli_adapters::spec::validate_placeholders(argument, options, true)
 }
 
 fn resolve_command(manifest: &GenericManifest, spec_path: &Path) -> Result<PathBuf> {
-    let manifest_directory = spec_path.parent().unwrap_or(Path::new("/"));
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let candidates = manifest
-        .requirements
-        .iter()
-        .find(|requirement| requirement.environment == manifest.generic.command)
-        .map(|requirement| {
-            requirement
-                .candidates
-                .iter()
-                .map(|candidate| resolve_candidate(candidate, manifest_directory, &home))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    resolve_cli(&manifest.generic.command, &candidates)
-}
-
-fn resolve_candidate(raw: &str, manifest_directory: &Path, home: &Path) -> PathBuf {
-    if raw == "~" {
-        return home.to_path_buf();
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return home.join(rest);
-    }
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    manifest_directory.join(path)
+    cli_adapters::spec::resolve_spec_command(
+        &manifest.generic.command,
+        &manifest.requirements,
+        spec_path,
+    )
 }
 
 fn build_arguments(
@@ -465,33 +294,7 @@ fn substitute(
     cwd: &Path,
     option_values: &[(String, String)],
 ) -> OsString {
-    let mut result = String::with_capacity(argument.len());
-    let mut rest = argument;
-    'outer: while let Some(start) = rest.find('{') {
-        let (head, tail) = rest.split_at(start);
-        result.push_str(head);
-        if let Some(after) = tail.strip_prefix("{session}") {
-            result.push_str(session);
-            rest = after;
-            continue;
-        }
-        if let Some(after) = tail.strip_prefix("{cwd}") {
-            result.push_str(&cwd.to_string_lossy());
-            rest = after;
-            continue;
-        }
-        for (key, value) in option_values {
-            if let Some(after) = tail.strip_prefix(&format!("{{option:{key}}}")) {
-                result.push_str(value);
-                rest = after;
-                continue 'outer;
-            }
-        }
-        result.push('{');
-        rest = &tail[1..];
-    }
-    result.push_str(rest);
-    OsString::from(result)
+    cli_adapters::spec::substitute(argument, session, cwd, option_values)
 }
 
 fn classify_jsonl_line(line: &str, text_paths: &[String]) -> (TaskOutputKind, String) {
@@ -633,20 +436,13 @@ fn skip_osc(characters: &mut std::iter::Peekable<std::str::Chars>) {
 }
 
 fn bounded_message(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.len() <= MAX_MESSAGE_BYTES {
-        return trimmed.to_owned();
-    }
-    let mut cut = MAX_MESSAGE_BYTES;
-    while !trimmed.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", &trimmed[..cut])
+    cli_adapters::spec::bounded_message(value, MAX_MESSAGE_BYTES)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cli_adapters::spec::resolve_candidate;
 
     fn spec(resume_arguments: Option<Vec<&str>>) -> GenericSpec {
         GenericSpec {

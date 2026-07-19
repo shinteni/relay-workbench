@@ -50,6 +50,7 @@ fi
 /bin/cp "$RUST_TARGET/release/claude-adapter" "$RESOURCES/bin/claude-adapter"
 /bin/cp "$RUST_TARGET/release/mix-adapter" "$RESOURCES/bin/mix-adapter"
 /bin/cp "$RUST_TARGET/release/generic-adapter" "$RESOURCES/bin/generic-adapter"
+/bin/cp "$RUST_TARGET/release/acp-adapter" "$RESOURCES/bin/acp-adapter"
 /bin/cp "$ROOT/adapters/manifests/"*.json "$RESOURCES/adapters/"
 /bin/cp "$NODE_BINARY" "$RESOURCES/bin/node"
 "$ROOT/scripts/prepare-mix-runtime.sh" "$RESOURCES/mix-runtime"
@@ -61,6 +62,7 @@ fi
     "$RESOURCES/bin/claude-adapter" \
     "$RESOURCES/bin/mix-adapter" \
     "$RESOURCES/bin/generic-adapter" \
+    "$RESOURCES/bin/acp-adapter" \
     "$RESOURCES/bin/node" \
     "$RESOURCES/mix-runtime/relay-mix.mjs"
 /usr/bin/codesign --force --deep --sign - "$APP"

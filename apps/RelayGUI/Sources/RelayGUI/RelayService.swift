@@ -312,6 +312,9 @@ private enum RelayClientError: LocalizedError {
 @MainActor
 final class RelayService: ObservableObject {
     @Published private(set) var agents: [RelayAgent]
+    @Published private(set) var personas: [RelayPersona] = RelayPersonaStore.load()
+    @Published private(set) var taskHooks: [RelayTaskHook] = RelayTaskHookStore.load()
+    private let taskHookRunner = RelayTaskHookRunner()
     @Published private(set) var tasks: [RelayTask] = []
     @Published private(set) var output: [RelayTaskOutput] = []
     @Published private(set) var outputTruncated = false
@@ -360,6 +363,7 @@ final class RelayService: ObservableObject {
     private let adapterDirectory: URL
     private let bundledAdapterDirectory: URL?
     private let genericAdapterURL: URL?
+    private let acpAdapterURL: URL?
     private let homeDirectory: URL
     private let runtimeDirectory: URL
     private let socketURL: URL
@@ -394,6 +398,9 @@ final class RelayService: ObservableObject {
         genericAdapterURL = Bundle.main.resourceURL?
             .appendingPathComponent("bin", isDirectory: true)
             .appendingPathComponent("generic-adapter")
+        acpAdapterURL = Bundle.main.resourceURL?
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("acp-adapter")
         homeDirectory = FileManager.default.homeDirectoryForCurrentUser
         runtimeDirectory = applicationDirectory.appendingPathComponent("runtime", isDirectory: true)
         socketURL = runtimeDirectory.appendingPathComponent(RelayProtocol.socketName)
@@ -439,6 +446,7 @@ final class RelayService: ObservableObject {
             userDirectory: adapterDirectory,
             home: home,
             genericAdapter: genericAdapterURL,
+            acpAdapter: acpAdapterURL,
             codexModels: catalog.models,
             claudeModels: RelayClaudeModels.discover(
                 binaryURL: RelayClaudeModels.resolveBinary(home: home),
@@ -541,7 +549,8 @@ final class RelayService: ObservableObject {
             let candidate = AdapterCatalog.loadManifest(
                 at: source,
                 home: homeDirectory,
-                genericAdapter: genericAdapterURL
+                genericAdapter: genericAdapterURL,
+                acpAdapter: acpAdapterURL
             )
             if case let .invalid(reason) = candidate.health {
                 throw RelayClientError.adapterImportRejected(reason)
@@ -560,7 +569,8 @@ final class RelayService: ObservableObject {
                 let existing = AdapterCatalog.loadManifest(
                     at: destination,
                     home: homeDirectory,
-                    genericAdapter: genericAdapterURL
+                    genericAdapter: genericAdapterURL,
+                    acpAdapter: acpAdapterURL
                 )
                 if !existing.id.hasPrefix("invalid:"), existing.id != candidate.id {
                     throw RelayClientError.adapterImportRejected(
@@ -574,7 +584,8 @@ final class RelayService: ObservableObject {
             let relocated = AdapterCatalog.loadManifest(
                 at: probe,
                 home: homeDirectory,
-                genericAdapter: genericAdapterURL
+                genericAdapter: genericAdapterURL,
+                acpAdapter: acpAdapterURL
             )
             if relocated.health != candidate.health,
                let reason = relocated.health.reason {
@@ -632,7 +643,8 @@ final class RelayService: ObservableObject {
                 let installed = AdapterCatalog.loadManifest(
                     at: destination,
                     home: homeDirectory,
-                    genericAdapter: genericAdapterURL
+                    genericAdapter: genericAdapterURL,
+                    acpAdapter: acpAdapterURL
                 )
                 guard installed.id == id, installed.health == .checking else {
                     throw RelayClientError.adapterImportRejected(
@@ -685,7 +697,8 @@ final class RelayService: ObservableObject {
                 let installed = AdapterCatalog.loadManifest(
                     at: agent.manifestURL,
                     home: homeDirectory,
-                    genericAdapter: genericAdapterURL
+                    genericAdapter: genericAdapterURL,
+                    acpAdapter: acpAdapterURL
                 )
                 guard installed.id == configuration.id, installed.health == .checking else {
                     throw RelayClientError.adapterImportRejected(
@@ -1239,6 +1252,7 @@ final class RelayService: ObservableObject {
         notificationBaseline = RelayNotificationPlanner.baseline(tasks)
         if !events.isEmpty {
             onTaskEvents?(events)
+            taskHookRunner.process(events: events, hooks: taskHooks)
         }
         if let selectedTaskID, !tasks.contains(where: { $0.id == selectedTaskID }) {
             self.selectedTaskID = nil
@@ -1559,7 +1573,9 @@ final class RelayService: ObservableObject {
 
     // MARK: - Dialogue primitives (background tasks, no selection changes)
 
-    func startDialogueTask(agentID: String, prompt: String) async throws -> String {
+    func startDialogueTask(
+        agentID: String, prompt: String, optionOverrides: [String: String] = [:]
+    ) async throws -> String {
         guard let agent = agents.first(where: { $0.id == agentID }),
               agent.isAvailable else {
             throw RelayClientError.unavailableAgent(agentID)
@@ -1567,7 +1583,8 @@ final class RelayService: ObservableObject {
         let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(defaultWorkingDirectory)
         let response = try await request([
             "start", "--adapter", agent.id, "--stdin", "--cwd", cwd,
-        ] + adapterOptionArguments(for: agent.id), input: Data(prompt.utf8))
+        ] + adapterOptionArguments(for: agent.id, overrides: optionOverrides),
+        input: Data(prompt.utf8))
         guard response.type == "task", let task = response.task else {
             throw RelayClientError.invalidResponse(response.type)
         }
@@ -1575,14 +1592,17 @@ final class RelayService: ObservableObject {
         return task.id
     }
 
-    func continueDialogueTask(taskID: String, prompt: String) async throws {
+    func continueDialogueTask(
+        taskID: String, prompt: String, optionOverrides: [String: String] = [:]
+    ) async throws {
         guard let task = tasks.first(where: { $0.id == taskID }),
               task.status.isTerminal,
               task.sessionID != nil else {
             throw RelayClientError.invalidResponse("dialogue_thread_not_resumable")
         }
         let response = try await request(
-            ["continue", taskID, "--stdin"] + adapterOptionArguments(for: task.adapterID),
+            ["continue", taskID, "--stdin"]
+                + adapterOptionArguments(for: task.adapterID, overrides: optionOverrides),
             input: Data(prompt.utf8)
         )
         guard response.type == "task", response.task != nil else {
@@ -1690,7 +1710,8 @@ final class RelayService: ObservableObject {
 
     /// Starts a task tagged with a `relay_group`, without touching selection.
     func startGroupTask(
-        agentID: String, prompt: String, group: String, cwd overrideCWD: String? = nil
+        agentID: String, prompt: String, group: String, cwd overrideCWD: String? = nil,
+        optionOverrides: [String: String] = [:]
     ) async throws -> String {
         guard let agent = agents.first(where: { $0.id == agentID }),
               agent.isAvailable else {
@@ -1705,7 +1726,8 @@ final class RelayService: ObservableObject {
             "--stdin",
             "--cwd", cwd,
             "--option", "relay_group=\(group)",
-        ] + adapterOptionArguments(for: agent.id), input: Data(prompt.utf8))
+        ] + adapterOptionArguments(for: agent.id, overrides: optionOverrides),
+        input: Data(prompt.utf8))
         guard response.type == "task", let task = response.task else {
             throw RelayClientError.invalidResponse(response.type)
         }
@@ -1716,7 +1738,8 @@ final class RelayService: ObservableObject {
     /// Submits a daemon-scheduled chain, without touching selection.
     /// Returns the chain group ID shared by all step tasks.
     func startChainRun(
-        sequence: [String], prompt: String, note: String
+        sequence: [String], prompt: String, note: String,
+        stepOverrides: [Int: [String: String]] = [:]
     ) async throws -> String {
         guard sequence.count >= 2 else {
             throw RelayClientError.invalidResponse("chain_needs_two_steps")
@@ -1736,8 +1759,9 @@ final class RelayService: ObservableObject {
         ]
         for (index, adapterID) in sequence.enumerated() {
             arguments += ["--step", adapterID]
-            for (key, value) in adapterOptions(for: adapterID)
-                .sorted(by: { $0.key < $1.key }) {
+            let merged = adapterOptions(for: adapterID)
+                .merging(stepOverrides[index + 1] ?? [:]) { _, override in override }
+            for (key, value) in merged.sorted(by: { $0.key < $1.key }) {
                 arguments += ["--step-option", "\(index + 1):\(key)=\(value)"]
             }
         }
@@ -2016,6 +2040,7 @@ final class RelayService: ObservableObject {
             userDirectory: adapterDirectory,
             home: homeDirectory,
             genericAdapter: genericAdapterURL,
+            acpAdapter: acpAdapterURL,
             codexModels: mixModels,
             claudeModels: RelayClaudeModels.discover(
                 binaryURL: RelayClaudeModels.resolveBinary(home: homeDirectory),
@@ -2080,12 +2105,22 @@ final class RelayService: ObservableObject {
     }
 
     private func validateGenericManifest(_ agent: RelayAgent) async throws {
-        guard agent.usesGenericRuntime else { return }
-        guard let genericAdapterURL else {
-            throw RelayClientError.missingResource("generic-adapter")
+        let validator: URL?
+        let resource: String
+        if agent.usesGenericRuntime {
+            validator = genericAdapterURL
+            resource = "generic-adapter"
+        } else if agent.usesAcpRuntime {
+            validator = acpAdapterURL
+            resource = "acp-adapter"
+        } else {
+            return
+        }
+        guard let validator else {
+            throw RelayClientError.missingResource(resource)
         }
         _ = try await runCommand(
-            executable: genericAdapterURL,
+            executable: validator,
             arguments: [
                 "validate", "--spec", agent.manifestURL.standardizedFileURL.path,
             ]
@@ -2168,10 +2203,53 @@ final class RelayService: ObservableObject {
         return values
     }
 
-    private func adapterOptionArguments(for adapterID: String) -> [String] {
+    private func adapterOptionArguments(
+        for adapterID: String, overrides: [String: String] = [:]
+    ) -> [String] {
         adapterOptions(for: adapterID)
+            .merging(overrides) { _, override in override }
             .sorted(by: { $0.key < $1.key })
             .flatMap { ["--option", "\($0.key)=\($0.value)"] }
+    }
+
+    // MARK: - Seat personas
+
+    func resolveMember(_ memberID: String) -> RelayMemberResolution? {
+        RelayPersonaStore.resolve(
+            memberID: memberID, personas: personas, agents: agents
+        )
+    }
+
+    func savePersona(_ persona: RelayPersona) {
+        if let index = personas.firstIndex(where: { $0.id == persona.id }) {
+            personas[index] = persona
+        } else {
+            guard personas.count < RelayPersonaStore.maxCount else { return }
+            personas.append(persona)
+        }
+        RelayPersonaStore.save(personas)
+    }
+
+    func deletePersona(id: UUID) {
+        personas.removeAll { $0.id == id }
+        RelayPersonaStore.save(personas)
+    }
+
+    // MARK: - Task lifecycle hooks
+
+    func saveTaskHook(_ hook: RelayTaskHook) {
+        if let index = taskHooks.firstIndex(where: { $0.id == hook.id }) {
+            taskHooks[index] = hook
+        } else {
+            guard taskHooks.count < RelayTaskHookStore.maxCount else { return }
+            taskHooks.append(hook)
+        }
+        RelayTaskHookStore.save(taskHooks)
+    }
+
+    func deleteTaskHook(id: UUID) {
+        taskHooks.removeAll { $0.id == id }
+        RelayTaskHookStore.save(taskHooks)
     }
 
     func agentOptionValue(agentID: String, option: RelayAgentOption) -> String {

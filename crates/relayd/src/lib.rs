@@ -1299,18 +1299,18 @@ async fn run_adapter_task_inner(
                     fail_task(
                         &tasks,
                         id,
-                        format!("failed to clean up adapter descendants: {error}"),
+                        format!("failed to clean up adapter descendants: {error:#}"),
                     )
                     .await;
                     return;
                 }
             }
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+            Err(error) if process_group_vanished(&error) => {}
             Err(error) => {
                 fail_task(
                     &tasks,
                     id,
-                    format!("failed to clean up adapter descendants: {error}"),
+                    format!("failed to clean up adapter descendants: {error:#}"),
                 )
                 .await;
                 return;
@@ -1361,7 +1361,7 @@ async fn terminate_child(child: &mut Child, process_group: Option<i32>) -> Resul
     let group_result = process_group.map(signal_process_group);
     let group_signal_sent = matches!(group_result, Some(Ok(())));
     let group_error = match group_result {
-        Some(Err(error)) if error.raw_os_error() != Some(libc::ESRCH) => Some(error),
+        Some(Err(error)) if !process_group_vanished(&error) => Some(error),
         _ => None,
     };
     if !group_signal_sent {
@@ -1390,6 +1390,16 @@ async fn terminate_child(child: &mut Child, process_group: Option<i32>) -> Resul
     Ok(())
 }
 
+/// After our direct child is reaped, EPERM from `kill(-pgid, …)` means no
+/// member of the group is ours anymore — the ID was recycled by an unrelated
+/// process. For cleanup purposes that is the same as the group being gone.
+fn process_group_vanished(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ESRCH) | Some(libc::EPERM)
+    )
+}
+
 fn signal_process_group(process_group: i32) -> std::io::Result<()> {
     // この子プロセス専用に作成したプロセスグループだけを終了する。
     let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
@@ -1409,7 +1419,7 @@ async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
         // 最初の SIGKILL と fork が競合して遅れて現れた子プロセスも同じ専用グループで止める。
         match signal_process_group(process_group) {
             Ok(()) => {}
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+            Err(error) if process_group_vanished(&error) => return Ok(()),
             Err(error) => return Err(error).context("failed to kill adapter process group"),
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1428,10 +1438,10 @@ fn process_group_exists(process_group: i32) -> std::io::Result<bool> {
         return Ok(true);
     }
     let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ESRCH) => Ok(false),
-        Some(libc::EPERM) => Ok(true),
-        _ => Err(error),
+    if process_group_vanished(&error) {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
@@ -2707,6 +2717,19 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recycled_process_groups_count_as_vanished() {
+        assert!(process_group_vanished(&std::io::Error::from_raw_os_error(
+            libc::ESRCH
+        )));
+        assert!(process_group_vanished(&std::io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+        assert!(!process_group_vanished(&std::io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+    }
+
     use super::*;
 
     fn task_store(entries: HashMap<Uuid, TaskEntry>) -> SharedTaskStore {

@@ -1024,13 +1024,92 @@ USER GATE 按新形态回归为第五种浮动窗口——**审批窗**（单例
 
 - 用户指令取消每分钟自主循环（cron `5be6910e` 已删除）。后续工作转为按需驱动。
 
-### 当前状态（随迭代更新，2026-07-19 更新至 v0.81.1）
+### v0.94.0：ACP 通用适配器（grok-build 通用借鉴队列 4/4，队列完成；用户点名启动）
+
+- **第五种接入形态**：manifest 声明 `acp` 段即可零代码串联任意 ACP（Agent Client Protocol v1）CLI。新增 `acp-adapter`（cli-adapters 0.4.0）作为 ACP client 驱动子进程：initialize（声明不提供 fs/terminal 能力）→ session/new（续聊经 session/load，agent 缺 `loadSession` 或加载失败时**明示回退**新会话）→ session/prompt；`agent_message_chunk`/`agent_thought_chunk` 聚合为 Assistant/System 输出（消息边界在工具调用与审批处切分），`tool_call`/`tool_call_update` 流式呈现（内容有界 8KiB），`session/request_permission` 的 options **原样映射为 USER GATE 审批动作**（kind 转说明文字、上限 8 项），应答回传所选 `optionId`；stopReason 映射终态（end_turn/max_tokens/max_turn_requests → completed，refusal/cancelled → failed）；agent 发来的其他 client 请求以 -32601 拒绝不挂起，未知通知忽略，非 JSON stdout 行降级为 System 输出。
+- **会话落盘的优雅关闭**：turn 结束**先发终态事件**（不拖 UX），再关 agent stdin 并给 ≤5 秒退出窗口才强杀——真实 agent（Claude Code SDK）在窗口内把会话转录完整写盘，跨进程 `session/load` 才能真正复原上下文（立即强杀会截断转录，实测 139B vs 2115B）。错误路径同样发射 Failed 事件（不再裸退出让 daemon 只报 exit status 1）。
+- **单一权威 validator**：`acp-adapter validate --spec` 与 generic 同构；requirement/options/占位符规则抽为 `cli_adapters::spec` 共享模块（generic 委托同一实现，20 项测试原样通过）；acp 参数支持 `{cwd}`/`{option:key}`、**拒绝 `{session}`**（会话由协议管理）。Swift 侧 `adapter_executable`/`generic`/`acp` 三选一互斥校验、`RELAY_ACP_SPEC` 注入、按 runtime 路由 validator、终端回退过滤新 spec 变量；`acp` manifest 不暴露简化 EDIT。
+- **mock + 真实双重端到端**：新增脚本化 `mock-acp-agent`（mock-adapter），提示词分支触发审批/工具/拒绝/不支持请求;daemon 下完成首轮、`session/load` 续聊（回放不重复输出）、`relayctl respond` 审批、refusal、-32601 全部场景。真实 CLI 用 `@zed-industries/claude-code-acp` 0.16.2（npm 全局安装，复用本机 Claude Code 登录态）：daemon 真实首轮 `ACP_TURN1_OK`、真实 `session/load` 续聊准确复述上一轮、真实 Terminal 工具流回传输出。注意事项：在 Claude Code 会话内测试需清除 `CLAUDECODE` 环境变量（CLI 拒绝嵌套,GUI 正常启动无此问题）。
+- 示例 `examples/gemini-acp.json`（gemini --experimental-acp）；grok CLI 本体 ACP 为进程内通道不暴露 stdio,维持 generic 接入。打包脚本纳入 acp-adapter。
+- 验证：Rust **108** 项（新增 acp-adapter 23）、Swift **114** 项（12 套件,新增 acp manifest 识别/互斥/缺 runtime/规则下沉/终端过滤）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.93.0 (121)` → **`0.94.0 (122)`**、cli-adapters `0.3.1` → `0.4.0`。
+
+### v0.94.1：ACP 适配器自查加固（用户要求"检查一下有什么问题没有"）
+
+- **审批门稳定性（真缺陷,已修）**：relayd `apply_event` 会用每个事件的 interaction 字段无条件覆盖 `pending_interaction`——ACP agent 若在权限请求挂起期间继续并行推送输出（协议允许,Codex 因回合内暂停碰不到）,原实现把这些输出转成 Running 事件,会把用户尚未回答的审批门从 daemon 抹掉,任务永久卡死（闲置超时因门挂起而不触发）。现在:门挂起期间所有输出**延迟缓冲**,应答后按时序释放并切一次消息边界;并发的第二个权限请求**排队**,前门关闭后自动浮现。mock 新增 `PERMISSION_PARALLEL` / `PERMISSION_DOUBLE` 分支,daemon 实测:并行输出下门完好、应答后延迟输出释放、双门先后浮现（`proceed-once+halt`）,旧场景（回声/续聊/单门/refusal）回归全过。
+- **诊断信息**：JSON-RPC 错误的 `data.details` 不再被吞（claude-code-acp 把真实原因藏在 details,此前只显示 "Internal error"）;`rpc_error_text` 统一提取,wait/prompt 两路共用。
+- **健壮性**：优雅退出窗口内 `try_wait` 出错不再把已完成任务翻成失败（daemon 以退出码覆盖终态的边界）。
+- 复核确认无问题的关键语义：终态事件在适配器退出后生效（优雅窗口推迟可见性 ≤5s,实测 agent 秒退）;终态后零发射(daemon 会判失败);`session_id: None` 不覆盖已记录会话（失败任务仍可续聊）。
+- 验证：Rust **109** 项（acp-adapter 24）、Swift 114 项全过、零警告；打包部署重启。版本 `0.94.0 (122)` → **`0.94.1 (123)`**。
+- 二次追问复核（"acp方面还有问题吗"）：daemon 对重复审批应答（`interaction_not_pending`）与 ID 错配（`interaction_mismatch`）有防护,adapter 的 unknown-interaction 分支经 daemon 不可达,v0.91 自动审批规则与 ACP 门同通道天然兼容；取消=硬杀仅丢当前回合、session 保留可续聊（与既有中断语义一致）；**部署版 GUI 生产链路真机验证**：用户目录 acp manifest → GUI 启动扫描 → 打包版 acp-adapter 校验 → 注册生产 daemon → 任务经打包二进制完成,随后测试任务/manifest/注册全部清理还原。已知可接受限制记录：空窗 15 分钟判挂（同 codex 策略）、失败路径不冲刷门挂起期间的缓冲输出、仅支持 ACP v1（低版本明确报错）、authenticate 不做交互式登录（失败列出 authMethods）。手动删 manifest 文件不会自动注销 daemon 注册属既有全局行为（GUI MANAGE 删除才同步注销）,非 ACP 特有。
+
+### v0.95.0：Hunk 级选择性采纳（grok-build 借鉴队列二 1/7，用户批准一、二梯队按序执行）
+
+- **"采纳此版"旁新增"选择采纳…"**：worktree 对比成员终态后可打开按块选择面板——`RelayDiffPatch` 把 `git diff` 解析为文件×hunk 树（含未跟踪新文件经 `add -N` 入 diff、纯改名/模式变更"仅元数据"、二进制文件明确标记不可补丁采纳）,文件行三态勾选（全选/半选/未选）、展开逐 hunk 勾选并预览 ±行数与正文;`采纳所选` 按选择重组补丁后 `git apply` 并入主项目,结果显示"已并入 N 块（M 文件）"。全量"采纳此版"保留。
+- **行号重定位**：丢弃同文件靠前 hunk 时,保留 hunk 的 `+` 起始行按被丢块的净增减精确回移,git apply 拿到的是准确坐标而非依赖上下文漂移搜索;hunk 主体按头部行数配额解析,尾随空行/无换行符标记（`\ No newline`）安全往返。灵感取 xai-hunk-tracker 的"按块管理改动",落 Relay 的"人握选择"（归属标注对 Relay 无意义——分身里只有 agent 在改,故不搬）。
+- 重构：`RelayWorktree.adopt` 拆出 `changesPatch`/`applyPatch` 供全量与选择两路复用,行为不变。
+- 验证：Swift **121** 项（13 套件,新增 DiffPatchTests 7 项:解析/全选重组/行号回移/跨文件选择域/二进制拒绝/简写头与无换行标记/真实仓库两 hunk 选一端到端）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.94.1 (123)` → **`0.95.0 (124)`**。
+
+### v0.96.0：结构化裁决输出（grok-build 借鉴队列二 2/7）
+
+- **⚡ 一键裁决的结论不再靠猜**：daemon 裁判的载荷尾部附加固定 JSON 约定（`{"verdict", "rationale"?, "confidence"?}`,借 grok `--json-schema` 的约束思想,落 CLI 无关的提示词层 + 本地严格解析）;返回后取**最后一个含非空 verdict 的 JSON 对象**（裸对象/围栏/散文内嵌均可,字符串内花括号安全）,置信度只认 high/medium/low。解析失败整段原文回退为非结构化结论——裁决永不丢失。
+- **证据保真**：`result.text` 始终存裁判原文逐字节不动;结构化字段（verdict/rationale/confidence）是决策模型上的**可选附加列**（旧检查点 JSON 解码兼容,终端裁决路径载荷与展示零变化）。决策面板结构化时主结论加粗、理由独立区块、把握徽章着色（high 绿/medium 蓝/low 琥珀）。
+- 验证：Swift **127** 项（14 套件,新增 ArbitrationVerdictTests 6 项:裸对象/围栏散文/末对象胜出与串内花括号/回退与置信度规整/daemon 载荷附加与终端载荷不动/旧记录解码兼容）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.95.0 (124)` → **`0.96.0 (125)`**。
+
+### v0.97.0：自检开关（grok-build 借鉴队列二 3/7）
+
+- **一个勾选框的交付质量杠杆**：同时发送与顺序串联的设置表单新增 `✓ 自检后交付`——开启时在发出的提示词尾部附加一段**可见的**自验证指令（按界面语言 zh/ja:逐条核对要求、能验证的实际验证、先修正再交付、一行报告自检结果）。借 grok `--check` 思想;指令是同一提示词的一部分,无隐藏调用。开关按窗口类型经 UserDefaults 跨重启记忆,默认关闭;仅作用于首轮派发（续轮/排队跟进不重复附加）。快速条保持极简未加（备忘）。
+- 验证：Swift **130** 项（15 套件,新增 SelfCheckTests 3 项:关闭原样/开启附加 zh+ja/按窗口类型独立持久化）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.96.0 (125)` → **`0.97.0 (126)`**。
+
+### v0.98.0：座次预设/人格档案（grok-build 借鉴队列二 4/7）
+
+- **命名预设=智能体+选项覆盖+追加规则**：设置窗「智能体」页新增座次预设管理——创建/编辑/删除（UserDefaults JSON 持久化,上限 24;名称单行 ≤48B,规则 ≤4000B）;编辑器按底层智能体的声明选项渲染覆盖选择器（`(默认)` 即不覆盖）。借 grok `--agents`/subagent persona-role 合成 + `--rules` 思想。
+- **虚拟成员 ID 打通选择器**：预设以 `persona:<uuid>` 进入既有 `[String]` 成员数组——圆桌 `+ PARTICIPANT` 菜单与同时发送复选列表在智能体之后列出可用预设（底层 CLI 不可用即隐藏）;派发时统一 `resolveMember` 解析为底层 adapter + 选项覆盖（合并至 `--option`,覆盖优先）+ 规则**可见前置**到该座次提示词（`规则\n---\n正文`,与自检尾注共存）。座次名/强调色显示预设名与底层色;顺序串联因共享提示词语义不支持预设（记录原因）。
+- 圆桌续轮的 continue 也带覆盖;对比 worktree 分身目录名用底层 agentID。预设底层智能体消失时解析为 nil,派发前即报"CLI 未找到"。
+- 验证：Swift **134** 项（16 套件,新增 PersonaTests 4 项:裸智能体解析/persona ID 往返与解析与底层缺失/规则前置与空规则免打扰/持久化与校验边界）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.97.0 (126)` → **`0.98.0 (127)`**。
+
+### v0.99.0：串联会话分叉（grok-build 借鉴队列二 5/7）
+
+- **续轮不再是单行道**：串联窗续轮栏新增 `⑂ 分叉`——把当前输入作为分叉提示词,将已完成的链**开成新窗口新任务组**:声明 `session_fork` 能力的步骤经 `relay_fork_from` 选项续接**原会话的副本**（claude-adapter 实现 `--resume 原会话 --fork-session --session-id 新ID`,续轮 resume 优先于 fork）,其余步骤明示重新开始;原窗口、原任务、原会话逐字节不动。借 grok `--fork-session` 思想,零协议变更（fork 经既有 options 通道,`startChainRun` 增加逐步覆盖参数,与全局选项合并且覆盖优先）。
+- 分叉窗顶部显示 `⑂ 已分叉——N 步续接会话副本,M 步重新开始` 摘要;claude manifest 声明 `session_fork`（codex app-server 无分叉原语、ACP fork 非 v1 核心,均暂不声明,记录为候选）。
+- 验证：Rust **112** 项（claude-adapter 新增 3:resume 优先/首轮 fork 参数/普通首轮）、Swift **137** 项（17 套件,新增 ChainForkTests 3:能力×会话过滤/1 基索引与跳过新开步/摘要三态）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.98.0 (127)` → **`0.99.0 (128)`**。
+
+### v0.100.0：检查点代码基线与漂移提示（grok-build 借鉴队列二 6/7）
+
+- **决策证据链补上"代码在哪"**：`保存私有检查点` 时捕获当前项目的 git HEAD + 未提交改动标记（`RelayDecisionBaseline`,非 git 项目静默省略）,作为可选字段写入检查点 JSON——旧记录解码兼容,冻结证据字节不变。决策详情证据时间线下方新增基线行:短 commit、保存时干净/脏、项目路径。
+- **显式只读漂移检查**：`检查漂移` 按钮把存储基线与仓库当前 HEAD 一次性比较——`HEAD 未变`（附当前是否有未提交改动）/`已前进至 <commit>`/`仓库不可用`;不后台运行、不自动 checkout、不写盘。借 grok `--restore-code` 的"会话↔代码位置绑定"思想,落 Relay 的"来源漂移检查"哲学（比较不恢复）。
+- 验证：Swift **139** 项（18 套件,新增 DecisionBaselineTests 2:旧检查点无基线解码兼容/真实仓库捕获→干净→脏→前进→缺失全链）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.99.0 (128)` → **`0.100.0 (129)`**。
+
+### v0.101.0：任务生命周期钩子（grok-build 借鉴队列二 7/7，队列完成）
+
+- **任务事件可以驱动你的本地自动化**：设置窗「通用」页新增钩子管理——事件（完成/失败/等待）×智能体范围（任意或指定）→ `/bin/zsh -c` 执行显式配置的命令;任务信息**只经环境变量**传入（`RELAY_TASK_ID/EVENT/STATUS/ADAPTER/TITLE/MESSAGE`,消息截 1000 字符）,绝不拼进命令串。复用通知规划器的状态转移事件源,每任务每事件去重触发;GUI 运行期间生效（描述明示）。借 xai-grok-hooks 思想,沿 v0.91 审批规则的"显式创建、可见可删"哲学（UserDefaults JSON,上限 32,命令 1–1000 字节）。
+- 队列二 1–7 全部交付：hunk 采纳（v0.95）→ 结构化裁决（v0.96）→ 自检开关（v0.97）→ 座次预设（v0.98）→ 会话分叉（v0.99）→ 检查点基线（v0.100）→ 生命周期钩子（v0.101）。
+- 验证：Swift **143** 项（19 套件,新增 TaskHookTests 4:事件映射/事件×智能体过滤/环境变量有界事实/持久化与校验与去重键）全过、零警告；打包部署重启。
+- 版本：Relay.app `0.100.0 (129)` → **`0.101.0 (130)`**。
+
+### v0.101.1 / v0.101.2：真机烟雾测试与两处修复（用户要求"先实际做一遍烟雾测试检查一下bug"）
+
+- **烟雾方法**：daemon 层用真实 Claude 实测两个原语;GUI 层经计算机控制在部署版 App 里逐项操作七个新功能（Ollama 本地跑对比/串联控制成本,Claude 只做裁判与分叉步）。
+- **daemon 层实测通过**：会话分叉原语——task1 记 token → 分叉 task2 准确复述 `RELAY_FORK_SMOKE_884` 且获独立新会话 → 原会话续聊 token 仍在、零污染;结构化裁决——真实 Claude 对 schema 约定返回裸 JSON,verdict/rationale/confidence=high 全解析。
+- **GUI 层实测通过**：钩子创建→对比两任务完成各触发一次（环境变量正确、去重生效）→ 删除;预设创建（选项选择器随智能体动态切换）→ 对比中"评审员"列锐评风格显著、跨重启持久;自检开关→ 输出尾部真实出现"自检结果"行、按窗口类型独立记忆;⚡ 一键裁决→ 结论加粗/理由区块/把握徽章;检查点基线行 `78eb3f79·保存时有未提交改动` 与 `检查漂移→HEAD 未变·当前有未提交改动` 与仓库实况一致;Claude→Codex 混合链 `⑂ 分叉` 开新窗、提示"1 步续接会话副本,1 步重新开始"、Claude 步"好的。"证实副本记忆、原窗不动;审批窗/琥珀横幅/排队占位均正常。
+- **v0.101.1 修复（v0.86 遗留缺陷,烟雾逮住）**：一键裁决构造决策时 receipt.targetID 与 result.id 各调一次 `UUID()`,而检查点校验器要求二者相等——daemon 裁决的决策**自 v0.86 起从未能保存检查点**（终端裁决路径不受影响）。修复:抽出 `RelayResultArbitration.daemonDecision` 单一 UUID 共用 + 回归测试;GUI 复测保存成功、决策库/检查点详情照常。Swift **144** 项。
+- **v0.101.2 修复（relayd 既有竞态,烟雾两次撞见）**：适配器进程组全员退出后 pgid 可能被系统回收给无关进程,此时 `kill(-pgid)` 返回 **EPERM** 而非 ESRCH——`process_group_exists` 误判"组还在"、SIGKILL 报错,daemon 把已正常完成的任务改判 `failed to clean up adapter descendants`（ACP 与 Codex 任务各撞一次,与适配器无关）。修复:EPERM 统一按"组已消亡"处理（POSIX 语义:EPERM=无任何可签收成员）,新增 `process_group_vanished` 分类 + 测试,清理失败消息改用 `{:#}` 保留根因 errno。relayd **0.9.4 → 0.9.5**（部署后自动替换,5 个 adapter 重注册）。Rust **113** 项。
+- 附带观察（非缺陷）：全 Ollama 链因无可续会话整体隐藏续轮栏（含分叉钮）,属既有 canFollowUp 语义;该提示文案以 Ollama 举例为静态翻译。烟雾产生的对比/串联任务与 1 个检查点保留在历史中;测试钩子已删,预设「评审员」保留可继续使用。
+- 版本：Relay.app `0.101.0 (130)` → `0.101.1 (131)` → **`0.101.2 (132)`**。
+
+### 当前状态（随迭代更新，2026-07-20 更新至 v0.101.2）
 
 - `main` @ `ed6e9a4`（v0.20.0 → v0.78.0 里程碑提交，纯本地、无远端推送）；**v0.79.0 (104) 至 v0.81.1 (107) 的迭代在工作树中未提交**（当前 7 个修改文件 + 新增 RelayDecks.swift / RelayWindowSystem.swift；另有链任务产物 `三维弹球/` 未跟踪、与 Relay 代码无关）——提交需用户明确指示。
 - 版本空洞说明：`0.34.0 (55)` 由并行会话（Codex）交付、未记入本 WORKLOG；其改动已包含在工作树与安装包中。
-- 当前运行版本：Relay.app **v0.93.0 (121)**（`~/Applications`）、cli-adapters 0.3.1、relay-protocol 0.3.0、relayd **0.9.4**、协议 v8；daemon 在线，注册 Claude / Codex / MIX / Ollama / Grok（grok 经用户目录 generic manifest 接入）。
+- 当前运行版本：Relay.app **v0.101.2 (132)**（`~/Applications`）、cli-adapters 0.4.0、relay-protocol 0.3.0、relayd **0.9.5**、协议 v8；daemon 在线，注册 Claude / Codex / MIX / Ollama / Grok（grok 经用户目录 generic manifest 接入）；ACP CLI 可经 `acp` manifest 接入（本机装有 claude-code-acp 可作真实 ACP 目标）。
 - 产品形态时间线：任务流线程工作台（→ v0.32）→ 嵌入式真 CLI 终端（v0.33）→ 自由浮动窗口（v0.36–v0.37）→ 智能体对话（v0.38）→ 对比/串联/审批窗回归（v0.39–v0.40）→ 侧栏交互重设计（v0.41）→ CLI 桌面记忆（v0.42）→ 项目坞与新窗口 cwd 单一真值（v0.43）→ 终端项目上下文护栏（v0.44）→ 当前项目 Claude + Codex 双开（v0.45）→ 跨 CLI 输出雷达（v0.46）→ 待查看输出队列（v0.47）→ 提示词暂存台（v0.48）→ 逐窗核对回路（v0.49）→ 隐私化编辑/Return 信号（v0.50）→ 可恢复核对胶囊（v0.51）→ 跨 CLI 行动路由器（v0.52）→ 可逆行动跳转（v0.53）→ 焦点电路（v0.54）→ 本地上下文接力（v0.55）→ 上下文分叉（v0.56）→ 结果汇流（v0.57）→ 结果裁决（v0.58）→ 裁决预算回流（v0.58.1）→ 裁决载荷预检（v0.59）→ 裁决血缘回看（v0.60）→ 来源漂移检查（v0.61）→ 裁决结果封存（v0.62）→ 私有决策检查点与决策库（v0.63）→ 检查点重裁决与派生血缘（v0.64）→ 父子决策差异审阅（v0.65）→ 多代决策血缘导航（v0.66）→ 跨分支决策比较（v0.67）→ 私有决策库本地搜索（v0.68）→ 不可变证据旁的私有标签与置顶（v0.69）→ 决策到行动桥（v0.70）→ 决策行动回执（v0.71）→ 行动恢复桥（v0.72）→ 恢复变化回执（v0.73）→ 恢复变化接力（v0.74）→ 恢复变化见证（v0.75）→ 恢复见证对照（v0.76）→ 见证对照接力（v0.77）→ 证据链收口（v0.78）→ daemon 结果接入汇流裁决（v0.79）→ 编排窗重挂载（v0.80）。当前工作区五种窗口：终端 / 对话 / 同时发送 / 顺序串联 / 审批。
-- 测试基线：Rust **85**（protocol 13 + relayd 38 + relayctl 10 + codex 3 + mix 1 + generic 20）/ Swift **105（12 套件）** / MIX 包装 3 / vendored MIX 64。
+- 测试基线：Rust **113**（protocol 13 + relayd 39 + relayctl 10 + codex 3 + claude 3 + mix 1 + generic 20 + acp 24）/ Swift **144（19 套件）** / MIX 包装 3 / vendored MIX 64。
 - daemon（v0.9.4）任务数 16：14 已完成 + 2 运行中（两条三维弹球链，2026-07-19 15:21 实测），无待审批任务；v0.77 真机 QA 的检查点、行动回执、恢复变化、三份恢复见证与终端此前均已清理。
 
 ### 遗留与候选方向（初始清单，多数已完成，见上方各节）

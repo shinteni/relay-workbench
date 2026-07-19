@@ -1,6 +1,6 @@
 # Relay 串联器
 
-面向 macOS 的本地多 CLI 智能体工作台。当前可直接调用 Codex CLI、Claude CLI、Grok CLI（经 generic manifest 零代码接入，含会话续聊）、本地 Ollama，以及让 Claude 与 Codex 达成最终共识的 MIX 智能体；并可通过通用 Adapter 协议继续接入其他 CLI。仓库保留 `xai-org/grok-build` 快照（grok CLI 的上游项目），作为 CLI runtime、ACP 和终端交互实现参考——产品代码不依赖它。
+面向 macOS 的本地多 CLI 智能体工作台。当前可直接调用 Codex CLI、Claude CLI、Grok CLI（经 generic manifest 零代码接入，含会话续聊）、本地 Ollama，以及让 Claude 与 Codex 达成最终共识的 MIX 智能体；并可通过通用 Adapter 协议继续接入其他 CLI——按行输出的 CLI 走 generic 段，讲 ACP（Agent Client Protocol）的 CLI 走 acp 段，都是零代码 manifest 接入。仓库保留 `xai-org/grok-build` 快照（grok CLI 的上游项目），作为 CLI runtime、ACP 和终端交互实现参考——产品代码不依赖它。
 
 ## 已实现
 
@@ -48,6 +48,13 @@
 - 后台任务完成/失败/等待时发送 macOS 系统通知；菜单栏常驻状态入口（daemon 状态、ACTIVE/WAITING 计数、重开主窗口）
 - 声明式选项栏：manifest `options`（含 `codex_models` / `claude_models` 动态取值源，Claude 模型列表直接从本机 CLI 二进制扫描）自动渲染模型/推理强度选择器
 - Adapter 管理面板：`IMPORT` 校验导入、`ADD CLI` 向导生成 manifest、简单 CLI 可 `EDIT`、用户 Adapter 可删除并同步注销 daemon 注册；侧栏实时显示每个 Adapter 的 `READY / MISSING / INVALID` 健康状态与原因
+- **Hunk 级选择性采纳**：worktree 对比成员的改动可按文件/改动块勾选合并——unified diff 解析为文件×hunk 树（新文件/纯改名/二进制分别标记），丢弃靠前 hunk 时保留块的目标行号精确回移；全量`采纳此版`保留
+- **结构化裁决输出**：⚡ 一键裁决向 daemon 裁判附加 JSON 结论约定（verdict/rationale/confidence），本地严格解析、失败原文回退；决策面板分离展示结论/理由/置信徽章，`result.text` 始终存裁判原文
+- **自检开关**：同发/串联设置里一个勾选框，发出前把可见的自验证指令附加到提示词尾（按界面语言，按窗口类型记忆）
+- **座次预设**：命名人格档案=智能体+选项覆盖+追加规则（设置窗管理）；圆桌座次与同发成员可直接选用，规则可见前置到该座次提示词，选项合并覆盖派发
+- **串联会话分叉**：续轮栏 `⑂ 分叉` 把已完成的链开成新窗口新任务组——支持 `session_fork` 的步骤（claude）续接原会话副本，其余明示重新开始；原窗口原会话不动
+- **检查点代码基线**：保存私有检查点时记录项目 git HEAD+脏标记；详情可显式`检查漂移`（只读比较，不 checkout）
+- **任务生命周期钩子**：任务完成/失败/等待时执行显式配置的本地命令，任务信息只经 `RELAY_TASK_*` 环境变量传入；可见可删、每任务每事件去重、GUI 运行期间生效
 
 ### daemon 与协议层
 
@@ -59,6 +66,7 @@
 - 与具体 CLI 无关的 versioned NDJSON Adapter 协议；Rust 与 Swift 共用同一 `protocol-version.txt` 派生 socket、LaunchAgent、握手和界面版本
 - manifest 驱动的 Adapter 发现、能力声明和运行时注册；新增 Adapter 不需要重启 daemon
 - 无代码接入：manifest 声明 `generic` 段即可串联任意行式 CLI；运行语义由内置 Rust validator（`generic-adapter validate`）统一判定
+- ACP 通用适配器：manifest 声明 `acp` 段即可串联任意 ACP（Agent Client Protocol v1）CLI——内置 `acp-adapter` 作为 ACP client 驱动子进程完成 initialize → session/new（续聊经 session/load，失败时明示回退新会话）→ session/prompt；agent 消息/思考块聚合为输出、tool_call 流式呈现、`session/request_permission` 直接映射为 USER GATE 审批，stopReason 映射任务终态；turn 结束后先发终态再给 agent ≤5 秒优雅退出窗口，保证会话转录落盘可续聊；validator 同样只有 `acp-adapter validate` 一个权威入口
 - 内置 MIX 共识运行时（vendored，独立于外部项目构建）；同一会话可续聊
 - 私有 Unix socket、进程组取消、连接/任务/输出上限和 Adapter 路径校验
 - COMPARE 并行对比、CHAIN 顺序接力（daemon 持久化推进）、`USER GATE` 审批均已按浮动窗口形态重新接入 GUI；`@agent` 转交仍保留在结构化任务流代码层
@@ -249,26 +257,71 @@ generic manifest 的运行时规则只有一个权威实现：
 
 GUI 在 `IMPORT`、`ADD CLI`、`EDIT` 和 daemon 注册前调用同一入口；Swift 只处理界面字段、文件路径和本机 requirement 解析。validator 只读取 manifest，不会启动目标 CLI。
 
+### 无代码接入 ACP CLI
+
+CLI 若原生支持 ACP（Agent Client Protocol，Zed 生态的 agent↔client stdio 协议，Gemini CLI、`claude-code-acp` 等均可），改为声明 `acp` 段即可获得比行式接入更完整的语义——流式消息、思考块、工具调用呈现、原生审批门和协议级会话续聊：
+
+```json
+{
+  "schema_version": 1,
+  "id": "gemini",
+  "name": "Gemini",
+  "detail": "Gemini CLI over ACP",
+  "capabilities": ["session_resume", "interactive_input"],
+  "acp": {
+    "command": "RELAY_GEMINI_PATH",
+    "arguments": ["--experimental-acp"]
+  },
+  "requirements": [
+    {
+      "name": "Gemini CLI",
+      "environment": "RELAY_GEMINI_PATH",
+      "candidates": ["~/.local/bin/gemini"],
+      "version_arguments": ["--version"]
+    }
+  ]
+}
+```
+
+约定：
+
+- `command` 同样必须等于某个 requirement 的 `environment`；`arguments` 是让 CLI 进入 ACP stdio 模式的固定参数，支持 `{cwd}` 与 `{option:key}` 占位符（无 `{session}`——会话由协议自身管理）
+- Relay 作为 ACP client 声明不提供 `fs` 与 `terminal` 能力，agent 的文件/终端操作全部在其自身进程内完成；agent 发来的其他 client 请求以 method-not-found 拒绝，不会挂起
+- `session/request_permission` 的选项原样映射为审批动作（`allow_once` 等 kind 转为说明文字），在统一审批窗处理后回传所选 `optionId`
+- 声明 `session_resume` 时续聊走 `session/load`（agent 需具备 `loadSession` 能力），加载期间的历史回放不会重复进入输出；恢复失败或 agent 不支持时明确提示并回退到新会话
+- agent 要求认证时任务会失败并列出其 `authMethods`，先在该 CLI 里完成登录再重试
+- `adapter_executable`、`generic`、`acp` 三者只能声明其一；GUI 注册时自动注入 `RELAY_ACP_SPEC`
+
+`adapters/manifests/examples/gemini-acp.json` 是可直接导入的示例。acp manifest 的运行时规则同样只有一个权威实现：
+
+```bash
+"$CARGO_TARGET_DIR/debug/acp-adapter" validate \
+  --spec "$PWD/adapters/manifests/examples/gemini-acp.json"
+```
+
+无真实 CLI 时可用 `mock-acp-agent`（`adapters/mock-adapter`）演练全链路：它是一个脚本化 ACP agent，提示词含 `PERMISSION` 触发审批、`TOOL` 触发工具流、`REFUSE` 触发拒绝终态,配合临时 manifest 即可在 daemon 下端到端验证。
+
 GUI 启动时和点击刷新时扫描内置 manifest 与用户目录。重复 ID、未知 schema、缺失文件和 daemon 安全校验失败都会在左侧显示原因，不会执行该 Adapter。
 
 ## 目录
 
 - `crates/relay-protocol`：通用协议、任务快照和输出事件
 - `crates/relayd`：常驻 daemon 和开发用 `relayctl`
-- `adapters/cli-adapters`：Codex、Claude 和 MIX 真实 Adapter
+- `adapters/cli-adapters`：Codex、Claude、MIX 真实 Adapter 与 generic / acp 两个 manifest 驱动 runtime
 - `adapters/manifests`：内置 Adapter manifest 与能力声明
 - `adapters/mix-runtime`：把原 `/mix` 共识流程接入 Relay 会话的运行器，以及可独立构建的 vendored 运行时
-- `adapters/mock-adapter`：无模型生命周期测试 Adapter
+- `adapters/mock-adapter`：无模型生命周期测试 Adapter 与脚本化 `mock-acp-agent`
 - `apps/RelayGUI`：macOS SwiftUI GUI
 - `scripts/package-macos-app.sh`：构建并组装 ad-hoc 签名的 `Relay.app`
 - `upstream/grok-build`：固定上游快照
 
 ## 已验证基线
 
-2026-07-19，Apple Silicon macOS：
+2026-07-20，Apple Silicon macOS：
 
-- Rust workspace 的 85 项协议/daemon/Adapter 测试全部通过（含 daemon CHAIN 调度、单调更新时间、watcher 父进程守卫与 generic-adapter 20 项）
-- Swift 的 **108 项测试（12 套件）**全部通过（v0.78 起：证据链收口后对照接力测试移除，新增圆桌脚本/窗口停靠/边缘吸附/纪要导出等；逐版门禁详见 WORKLOG）：manifest 与自定义 CLI 生成/编辑、共享协议版本派生、LaunchAgent 路径漂移判定、交互解码、命令管道、语言持久化、通知计划、Markdown 渲染、Claude 模型二进制扫描、项目历史、双开、输出雷达、待查看队列、跨 CLI 行动路由、可逆返回票与焦点电路、本地上下文分叉的截取/载荷/就绪目标过滤/多目标核对、结果汇流的显式冻结/聚焦/重新截取/返回核对与生命周期清理、结果裁决的多来源公平截尾/短来源预算回流/精确载荷预检/内存回执/只读来源回看与核对往返/显式来源漂移检查/裁决结果显式封存与不可变快照/私有原子检查点/重启恢复/坏文件隔离/可恢复移入废纸篓/派生血缘/父子差异/多代血缘导航/缺失父节点与循环边界/连通家族遍历/跨分支参考比较/私有内容多词搜索/查询往返生命周期/独立标题标签/置顶排序/证据字节不变/标签跨重启恢复与联动清理/决策到行动/行动回执/行动恢复/变化回执/变化接力/见证保存/见证对照/单目标投递/失败保留、提示词安全暂存、可恢复逐窗核对回路与隐私化输入信号、终端命令构造、浮动窗口几何（移动钳制/八向缩放/级联/平铺）、对话提示词脚本与窗口注册
+- Rust workspace 的 **113 项**协议/daemon/Adapter 测试全部通过（含 daemon CHAIN 调度、单调更新时间、watcher 父进程守卫、generic-adapter 20 项、acp-adapter 24 项、claude-adapter 会话分叉 3 项与 relayd 进程组回收分类）
+- ACP 通用适配器端到端通过：mock ACP agent 走 daemon 完成首轮、`session/load` 续聊（回放不重复输出）、审批门（`relayctl respond` 选择 optionId 后回传并完成）、门挂起期间并行输出不打断审批（延迟释放）、双权限请求排队浮现、工具流、refusal 失败与不支持 client 请求的 -32601 应答；真实 CLI 用 `@zed-industries/claude-code-acp`（0.16.2，复用本机 Claude Code 登录态）经 daemon 完成真实首轮（`ACP_TURN1_OK`）、真实 `session/load` 续聊（准确复述上一轮内容，优雅退出窗口保证转录落盘）与真实工具流（Terminal 工具执行 + 输出回传）；`acp-adapter validate` 接受合法 manifest、拒绝 `{session}` 占位符
+- Swift 的 **144 项测试（19 套件）**全部通过（v0.78 起：证据链收口后对照接力测试移除，新增圆桌脚本/窗口停靠/边缘吸附/纪要导出等；逐版门禁详见 WORKLOG）：manifest 与自定义 CLI 生成/编辑、共享协议版本派生、LaunchAgent 路径漂移判定、交互解码、命令管道、语言持久化、通知计划、Markdown 渲染、Claude 模型二进制扫描、项目历史、双开、输出雷达、待查看队列、跨 CLI 行动路由、可逆返回票与焦点电路、本地上下文分叉的截取/载荷/就绪目标过滤/多目标核对、结果汇流的显式冻结/聚焦/重新截取/返回核对与生命周期清理、结果裁决的多来源公平截尾/短来源预算回流/精确载荷预检/内存回执/只读来源回看与核对往返/显式来源漂移检查/裁决结果显式封存与不可变快照/私有原子检查点/重启恢复/坏文件隔离/可恢复移入废纸篓/派生血缘/父子差异/多代血缘导航/缺失父节点与循环边界/连通家族遍历/跨分支参考比较/私有内容多词搜索/查询往返生命周期/独立标题标签/置顶排序/证据字节不变/标签跨重启恢复与联动清理/决策到行动/行动回执/行动恢复/变化回执/变化接力/见证保存/见证对照/单目标投递/失败保留、提示词安全暂存、可恢复逐窗核对回路与隐私化输入信号、终端命令构造、浮动窗口几何（移动钳制/八向缩放/级联/平铺）、对话提示词脚本与窗口注册
 - 浮动终端窗口与智能体对话为 v0.33–v0.38 新形态：对话引擎依赖的 daemon 原语链路（start → completed → 输出提取 → 清理）已用本地 Ollama gemma4 真实任务端到端验证
 - 以下部分条目验证于 v0.32 及更早的线程工作台 GUI 形态（该形态入口已移除、能力保留在 daemon/代码层），保留作历史验证记录：
 - generic-adapter 端到端通过：echo 示例完成多行输出；session 示例首轮注入 `--session-id`、续聊注入 `--resume` 与 `{cwd}`；失败示例记录 stderr 摘要并标记 `failed`
@@ -299,4 +352,4 @@ GUI 启动时和点击刷新时扫描内置 manifest 与用户目录。重复 ID
 - 快照提交：`8adf9013a0929e5c7f1d4e849492d2387837a28d`
 - 位置：`upstream/grok-build`
 
-Grok Build 的 leader 与 Grok 认证、模型和升级逻辑耦合较深，因此本项目使用独立的通用 daemon，而不把 Grok 专用 shell 作为 Codex/Claude 的运行时依赖。后续接入 ACP-native CLI 时，可按 Adapter 评估复用 `xai-acp-lib`。
+Grok Build 的 leader 与 Grok 认证、模型和升级逻辑耦合较深，因此本项目使用独立的通用 daemon，而不把 Grok 专用 shell 作为 Codex/Claude 的运行时依赖。ACP-native CLI 已由 v0.94 的内置 `acp-adapter` 覆盖（独立实现，`xai-acp-lib` 仅作协议参考；grok CLI 本体的 ACP 为进程内通道、不暴露 stdio 服务，故 grok 仍走 generic 接入）。
