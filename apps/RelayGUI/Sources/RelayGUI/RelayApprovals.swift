@@ -56,12 +56,55 @@ struct RelayApprovalWindow: View {
                 .lineLimit(1)
         } controls: {
         } content: {
-            if pendingTasks.isEmpty {
-                emptyState
-            } else {
-                gateList
+            VStack(spacing: 0) {
+                if pendingTasks.isEmpty {
+                    emptyState
+                } else {
+                    gateList
+                }
+                if !relay.approvalRules.isEmpty {
+                    Rectangle()
+                        .fill(RelayPalette.line)
+                        .frame(height: 1)
+                    rulesSection
+                }
             }
         }
+    }
+
+    private var rulesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(copy.text("AUTO RULES"))
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .tracking(1.2)
+                .foregroundStyle(RelayPalette.muted)
+            ForEach(relay.approvalRules) { rule in
+                HStack(spacing: 7) {
+                    Text(rule.adapterID.uppercased())
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(accent(rule.adapterID))
+                    Text("\(rule.commandPrefix) → \(rule.actionLabel)")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        relay.removeApprovalRule(rule.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 7, weight: .bold))
+                            .frame(width: 13, height: 13)
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                    .help(copy.text("Remove this rule"))
+                }
+            }
+            Text(copy.text("Rules apply per agent to matching tool approvals — remove anytime."))
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(RelayPalette.muted)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 
     private var emptyState: some View {
@@ -117,6 +160,37 @@ struct RelayApprovalWindow: View {
                             answers: answers
                         )
                     }
+                }
+                if interaction.kind == .approval,
+                   interaction.questions.isEmpty,
+                   !interaction.actions.isEmpty,
+                   let line = RelayApprovalRules.commandLine(from: interaction) {
+                    Menu {
+                        ForEach(interaction.actions) { option in
+                            Button(copy.text("Auto-⟨ACTION⟩ when the command starts with '⟨PREFIX⟩'")
+                                .replacingOccurrences(of: "⟨ACTION⟩", with: option.label)
+                                .replacingOccurrences(
+                                    of: "⟨PREFIX⟩",
+                                    with: RelayApprovalRules.prefix(of: line)
+                                )) {
+                                Task {
+                                    await relay.addApprovalRule(
+                                        taskID: task.id,
+                                        interaction: interaction,
+                                        action: option
+                                    )
+                                }
+                            }
+                        }
+                    } label: {
+                        Text("☑ \(copy.text("ALWAYS"))")
+                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .foregroundStyle(RelayPalette.muted)
+                    .help(copy.text("Save a rule so matching approvals are answered automatically."))
                 }
             }
             .padding(10)

@@ -1273,6 +1273,7 @@ final class RelayService: ObservableObject {
         } else {
             await refreshSelectedOutput(showErrors: showErrors)
         }
+        await autoApplyApprovalRules()
         daemonState = .online
         if showErrors {
             errorMessage = nil
@@ -1610,6 +1611,65 @@ final class RelayService: ObservableObject {
         await refreshTasks(showErrors: false)
     }
 
+    /// User-created auto-approval rules (explicit, visible, deletable).
+    @Published private(set) var approvalRules: [RelayApprovalRule] = RelayApprovalRules.load()
+    /// task.id + interaction.id pairs already auto-responded (retry guard).
+    private var autoRespondedInteractionKeys: Set<String> = []
+
+    /// Saves a rule derived from this interaction, then answers it.
+    func addApprovalRule(
+        taskID: String,
+        interaction: RelayInteraction,
+        action: RelayInteractionOption
+    ) async {
+        guard let line = RelayApprovalRules.commandLine(from: interaction),
+              let task = tasks.first(where: { $0.id == taskID }) else { return }
+        let prefix = RelayApprovalRules.prefix(of: line)
+        let rule = RelayApprovalRule(
+            adapterID: task.adapterID,
+            commandPrefix: prefix,
+            actionValue: action.value,
+            actionLabel: action.label,
+            createdAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000)
+        )
+        if !approvalRules.contains(where: {
+            $0.adapterID == rule.adapterID
+                && $0.commandPrefix == rule.commandPrefix
+                && $0.actionValue == rule.actionValue
+        }) {
+            approvalRules.append(rule)
+            RelayApprovalRules.store(approvalRules)
+        }
+        await respondToInteraction(
+            taskID: taskID, interaction: interaction, action: action.value
+        )
+    }
+
+    func removeApprovalRule(_ id: UUID) {
+        approvalRules.removeAll { $0.id == id }
+        RelayApprovalRules.store(approvalRules)
+    }
+
+    /// Applies stored rules to newly arrived approvals (one per frame).
+    private func autoApplyApprovalRules() async {
+        guard respondingInteractionID == nil, !approvalRules.isEmpty else { return }
+        for task in tasks {
+            guard let interaction = task.pendingInteraction else { continue }
+            let key = "\(task.id):\(interaction.id)"
+            guard !autoRespondedInteractionKeys.contains(key) else { continue }
+            guard let rule = approvalRules.first(where: {
+                RelayApprovalRules.matches(
+                    $0, adapterID: task.adapterID, interaction: interaction
+                )
+            }) else { continue }
+            autoRespondedInteractionKeys.insert(key)
+            await respondToInteraction(
+                taskID: task.id, interaction: interaction, action: rule.actionValue
+            )
+            return
+        }
+    }
+
     /// Task IDs whose cached outputs must survive task-list pruning because a
     /// workspace window engine is watching them.
     private var pinnedOutputTaskIDs: Set<String> = []
@@ -1630,13 +1690,15 @@ final class RelayService: ObservableObject {
 
     /// Starts a task tagged with a `relay_group`, without touching selection.
     func startGroupTask(
-        agentID: String, prompt: String, group: String
+        agentID: String, prompt: String, group: String, cwd overrideCWD: String? = nil
     ) async throws -> String {
         guard let agent = agents.first(where: { $0.id == agentID }),
               agent.isAvailable else {
             throw RelayClientError.unavailableAgent(agentID)
         }
-        let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(defaultWorkingDirectory)
+        let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(
+            overrideCWD ?? defaultWorkingDirectory
+        )
         let response = try await request([
             "start",
             "--adapter", agent.id,

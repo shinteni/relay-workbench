@@ -3068,6 +3068,104 @@ struct RelayTerminalTests {
     }
 
     @Test
+    func worktreeIsolationCreatesDiffsAdoptsAndRemoves() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("RelayWorktreeTests-\(UUID().uuidString)")
+        let project = root.appendingPathComponent("project")
+        try fm.createDirectory(at: project, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        try await RelayWorktree.runGit(["-C", project.path, "init"])
+        try await RelayWorktree.runGit(["-C", project.path, "config", "user.email", "relay@test"])
+        try await RelayWorktree.runGit(["-C", project.path, "config", "user.name", "relay"])
+        try "hello\n".write(
+            to: project.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8
+        )
+        try await RelayWorktree.runGit(["-C", project.path, "add", "-A"])
+        try await RelayWorktree.runGit(["-C", project.path, "commit", "-m", "base"])
+        #expect(await RelayWorktree.isGitRepo(project.path))
+
+        let worktree = root.appendingPathComponent("wt")
+        let base = try await RelayWorktree.create(
+            project: project.path, destination: worktree
+        )
+        #expect(base.count >= 7)
+
+        try "hello world\n".write(
+            to: worktree.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8
+        )
+        try "new\n".write(
+            to: worktree.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8
+        )
+        let stat = await RelayWorktree.shortStat(worktree: worktree.path, base: base)
+        #expect(!stat.isEmpty)
+
+        let adopted = try await RelayWorktree.adopt(
+            worktree: worktree.path, base: base, into: project.path
+        )
+        #expect(!adopted.isEmpty)
+        let merged = try String(
+            contentsOf: project.appendingPathComponent("a.txt"), encoding: .utf8
+        )
+        #expect(merged == "hello world\n")
+        #expect(fm.fileExists(atPath: project.appendingPathComponent("b.txt").path))
+
+        await RelayWorktree.remove(project: project.path, worktree: worktree.path)
+        #expect(!fm.fileExists(atPath: worktree.path))
+    }
+
+    @Test
+    func approvalRulesMatchPerAgentWithTokenBoundaries() {
+        let approve = RelayInteractionOption(
+            value: "approve", label: "允许", description: nil
+        )
+        let interaction = RelayInteraction(
+            id: "0", kind: .approval,
+            title: "Codex wants to run a command",
+            message: "$ npm run build\nBuilds the project",
+            actions: [approve], questions: []
+        )
+        let line = RelayApprovalRules.commandLine(from: interaction)
+        #expect(line == "npm run build")
+        #expect(RelayApprovalRules.prefix(of: line ?? "") == "npm run")
+
+        let rule = RelayApprovalRule(
+            adapterID: "codex", commandPrefix: "npm run",
+            actionValue: "approve", actionLabel: "允许",
+            createdAtMilliseconds: 1
+        )
+        #expect(RelayApprovalRules.matches(rule, adapterID: "codex", interaction: interaction))
+        #expect(!RelayApprovalRules.matches(rule, adapterID: "claude", interaction: interaction))
+
+        let boundary = RelayInteraction(
+            id: "1", kind: .approval, title: "t",
+            message: "npm runx build", actions: [approve], questions: []
+        )
+        #expect(!RelayApprovalRules.matches(rule, adapterID: "codex", interaction: boundary))
+
+        let wrongAction = RelayInteraction(
+            id: "2", kind: .approval, title: "t",
+            message: "npm run dev",
+            actions: [RelayInteractionOption(value: "deny", label: "拒绝", description: nil)],
+            questions: []
+        )
+        #expect(!RelayApprovalRules.matches(rule, adapterID: "codex", interaction: wrongAction))
+
+        let input = RelayInteraction(
+            id: "3", kind: .input, title: "t", message: "npm run dev",
+            actions: [approve], questions: []
+        )
+        #expect(!RelayApprovalRules.matches(rule, adapterID: "codex", interaction: input))
+
+        let suite = "RelayApprovalRulesTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        RelayApprovalRules.store([rule], to: defaults)
+        #expect(RelayApprovalRules.load(from: defaults) == [rule])
+    }
+
+    @Test
     func edgeSnapTargetsFireOnlyWhenFlushAgainstBounds() {
         let size = CGSize(width: 1200, height: 800)
         let area = RelayWindowGeometry.canvas(size)

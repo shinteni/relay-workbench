@@ -133,6 +133,9 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
     @Published var rounds = 2
     @Published private(set) var messages: [Message] = []
     @Published private(set) var phase: Phase = .setup
+    /// Moderator messages queued while a round is running; sent in order.
+    @Published private(set) var queuedModeratorMessages: [String] = []
+    private var queuedModeratorName = ""
 
     private weak var relay: RelayService?
     private var engine: Task<Void, Never>?
@@ -173,6 +176,29 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         engine = Task { [weak self] in
             await self?.runTurns(startingAt: 0, totalTurns: total)
         }
+    }
+
+    /// Queues or sends a moderator message: immediate when the table is
+    /// idle, queued (FIFO) while a round is still running.
+    func submitModerator(message: String, moderatorName: String) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if case .completed = phase, queuedModeratorMessages.isEmpty {
+            continueRound(moderatorMessage: trimmed, moderatorName: moderatorName)
+        } else if isRunning || phase == .completed {
+            queuedModeratorMessages.append(trimmed)
+            queuedModeratorName = moderatorName
+        }
+    }
+
+    func clearQueuedModeratorMessages() {
+        queuedModeratorMessages.removeAll()
+    }
+
+    private func drainModeratorQueueIfNeeded() {
+        guard case .completed = phase, !queuedModeratorMessages.isEmpty else { return }
+        let next = queuedModeratorMessages.removeFirst()
+        continueRound(moderatorMessage: next, moderatorName: queuedModeratorName)
     }
 
     /// The moderator (you) speaks into the table; every participant sees the
@@ -321,6 +347,7 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         }
         phase = .completed
         engine = nil
+        drainModeratorQueueIfNeeded()
     }
 
     private func performTurn(
@@ -465,7 +492,7 @@ struct RelayDialogueWindow: View {
             } else {
                 VStack(spacing: 0) {
                     transcript
-                    if case .completed = run.phase {
+                    if run.isRunning || run.phase == .completed {
                         moderatorBar
                     }
                 }
@@ -479,7 +506,9 @@ struct RelayDialogueWindow: View {
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
                 .foregroundStyle(RelayPalette.signal)
             TextField(
-                copy.text("Speak as the moderator — starts one more round…"),
+                copy.text(run.isRunning
+                    ? "Queue the next message — sent automatically when this round finishes…"
+                    : "Speak as the moderator — starts one more round…"),
                 text: $moderatorDraft,
                 axis: .vertical
             )
@@ -487,6 +516,16 @@ struct RelayDialogueWindow: View {
             .font(.system(size: 11.5, design: .monospaced))
             .lineLimit(1...4)
             .onSubmit(sendModeratorMessage)
+            if !run.queuedModeratorMessages.isEmpty {
+                Button(copy.text("⟨N⟩ queued")
+                    .replacingOccurrences(
+                        of: "⟨N⟩", with: "\(run.queuedModeratorMessages.count)"
+                    )) {
+                    run.clearQueuedModeratorMessages()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Clear queue"))
+            }
             Button(copy.text("SEND")) {
                 sendModeratorMessage()
             }
@@ -525,8 +564,8 @@ struct RelayDialogueWindow: View {
         let text = moderatorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         moderatorDraft = ""
-        run.continueRound(
-            moderatorMessage: text,
+        run.submitModerator(
+            message: text,
             moderatorName: copy.text("Moderator")
         )
     }

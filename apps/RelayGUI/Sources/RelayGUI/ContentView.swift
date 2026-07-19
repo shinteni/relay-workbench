@@ -138,6 +138,7 @@ struct ContentView: View {
     @State private var hasAutoFocusedComposer = false
     @State private var showingSaveTemplate = false
     @State private var chainTemplateName = ""
+    @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @StateObject private var terminals = RelayTerminalStore()
     @FocusState private var promptFocused: Bool
     @FocusState private var renameFocused: Bool
@@ -153,6 +154,58 @@ struct ContentView: View {
         relay.tasks.compactMap { $0.pendingInteraction?.id }
     }
 
+    private func toggleSidebar() {
+        if reduceMotion {
+            sidebarCollapsed.toggle()
+        } else {
+            withAnimation(.spring(response: 0.3, dampingFraction: 1.0)) {
+                sidebarCollapsed.toggle()
+            }
+        }
+    }
+
+    /// Slim rail shown while the sidebar is collapsed: expand control plus
+    /// the approvals alert so urgent items never hide with the sidebar.
+    private var collapsedRail: some View {
+        VStack(spacing: 12) {
+            Button {
+                toggleSidebar()
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(RelayPalette.muted)
+            .keyboardShortcut("\\", modifiers: .command)
+            .help(copy.text("Expand sidebar"))
+            if !pendingInteractionIDs.isEmpty {
+                Button {
+                    terminals.openApprovals()
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Text("◇")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.warning)
+                        Circle()
+                            .fill(RelayPalette.danger)
+                            .frame(width: 5, height: 5)
+                            .offset(x: 4, y: -3)
+                    }
+                    .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help(copy.text("Tasks that ask for tool approval or extra input show up here."))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 42)
+        .padding(.bottom, 12)
+        .frame(width: 30)
+        .frame(maxHeight: .infinity)
+        .background(RelayMaterial(material: .sidebar))
+    }
+
     private var workspaceAccent: Color {
         let agentID = relay.selectedTask?.adapterID ?? relay.selectedAgentID
         return relay.agents.first { $0.id == agentID }?.accent ?? RelayPalette.signal
@@ -160,9 +213,13 @@ struct ContentView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            sidebar
-                .frame(width: 310)
-                .background(RelayMaterial(material: .sidebar))
+            if sidebarCollapsed {
+                collapsedRail
+            } else {
+                sidebar
+                    .frame(width: 310)
+                    .background(RelayMaterial(material: .sidebar))
+            }
 
             Rectangle()
                 .fill(RelayPalette.line)
@@ -376,27 +433,41 @@ struct ContentView: View {
                 glyph: "›", label: copy.text("CHAIN"), tint: RelayPalette.warning,
                 helpKey: "Relay the answer through steps"
             ) { openChain() }
+        }
+    }
+
+    /// Amber banner that exists only while tasks wait in USER GATE —
+    /// approvals are a to-do, not a feature, so they only appear when due.
+    @ViewBuilder private var approvalsBanner: some View {
+        if !pendingInteractionIDs.isEmpty {
             Button {
                 terminals.openApprovals()
             } label: {
-                linkButtonLabel(
-                    glyph: "◇",
-                    label: pendingInteractionIDs.isEmpty
-                        ? copy.text("Approvals")
-                        : "\(copy.text("Approvals")) \(pendingInteractionIDs.count)",
-                    glyphTint: RelayPalette.warning
-                )
-            }
-            .buttonStyle(LinkActionButtonStyle(tint: RelayPalette.muted))
-            .help(copy.text("Tasks that ask for tool approval or extra input show up here."))
-            .overlay(alignment: .topTrailing) {
-                if !pendingInteractionIDs.isEmpty {
-                    Circle()
-                        .fill(RelayPalette.danger)
-                        .frame(width: 6, height: 6)
-                        .offset(x: -3, y: 3)
+                HStack(spacing: 7) {
+                    Text("◇")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    Text(copy.text("⟨N⟩ approvals waiting — click to respond")
+                        .replacingOccurrences(
+                            of: "⟨N⟩", with: "\(pendingInteractionIDs.count)"
+                        ))
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    Spacer()
+                    Text("→")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
                 }
+                .foregroundStyle(RelayPalette.warning)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(RelayPalette.warning.opacity(0.09))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(RelayPalette.warning.opacity(0.35), lineWidth: 1)
+                }
+                .contentShape(RoundedRectangle(cornerRadius: 7))
             }
+            .buttonStyle(.plain)
+            .help(copy.text("Tasks that ask for tool approval or extra input show up here."))
         }
     }
 
@@ -498,6 +569,15 @@ struct ContentView: View {
                 }
                 Spacer()
                 Button {
+                    toggleSidebar()
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .keyboardShortcut("\\", modifiers: .command)
+                .help(copy.text("Collapse sidebar"))
+                Button {
                     openSettings()
                 } label: {
                     Image(systemName: "gearshape")
@@ -557,6 +637,9 @@ struct ContentView: View {
             linkActions
                 .padding(.horizontal, 10)
                 .padding(.top, 2)
+                .padding(.bottom, 6)
+            approvalsBanner
+                .padding(.horizontal, 10)
                 .padding(.bottom, 6)
 
             Rectangle()

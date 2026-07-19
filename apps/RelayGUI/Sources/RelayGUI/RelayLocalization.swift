@@ -616,6 +616,34 @@ struct RelayCopy {
         "Roundtable minutes": "圆桌纪要",
         "Transcript": "转录",
         "Save the transcript as a Markdown file": "把整场转录导出为 Markdown 文件",
+        "⟨N⟩ approvals waiting — click to respond": "⟨N⟩ 项审批等待处理——点击进入",
+        "Collapse sidebar": "收起侧栏（⌘\\）",
+        "Expand sidebar": "展开侧栏（⌘\\）",
+        "Isolated worktrees (git)": "隔离工作区（git worktree）",
+        "Each agent codes in its own copy of the repo; adopt the winning diff afterwards.":
+            "每个智能体在仓库的独立分身里改代码、互不践踏；跑完可一键采纳优胜改动",
+        "The current project is not a git repository — worktree isolation is unavailable.":
+            "当前项目不是 git 仓库，无法隔离工作区",
+        "Isolated worktree: ⟨PATH⟩": "隔离分身：⟨PATH⟩",
+        "ADOPT THIS VERSION": "采纳此版",
+        "Apply this worktree's diff onto the project": "把这个分身的全部改动并入主项目",
+        "Adopted into the project: ⟨STAT⟩": "已并入主项目：⟨STAT⟩",
+        "No changes to adopt.": "该分身没有改动",
+        "Applying…": "并入中…",
+        "ALWAYS": "总是",
+        "Auto-⟨ACTION⟩ when the command starts with '⟨PREFIX⟩'":
+            "命令以「⟨PREFIX⟩」开头时自动「⟨ACTION⟩」",
+        "AUTO RULES": "自动规则",
+        "Rules apply per agent to matching tool approvals — remove anytime.":
+            "规则按智能体生效，匹配的工具审批自动处理；可随时删除",
+        "Remove this rule": "删除这条规则",
+        "Save a rule so matching approvals are answered automatically.":
+            "保存规则：以后同类审批自动应答，不再打扰",
+        "no changes yet": "还没动手…",
+        "Queue the next message — sent automatically when this round finishes…":
+            "排队下一条：本轮结束后自动发出…",
+        "⟨N⟩ queued": "已排队 ⟨N⟩",
+        "Clear queue": "点击清空排队",
         "EVIDENCE TIMELINE": "证据时间线",
         "CHECKPOINT": "检查点",
         "ACTIONS": "行动",
@@ -1307,6 +1335,34 @@ struct RelayCopy {
         "Roundtable minutes": "円卓議事録",
         "Transcript": "トランスクリプト",
         "Save the transcript as a Markdown file": "トランスクリプトを Markdown として保存",
+        "⟨N⟩ approvals waiting — click to respond": "承認待ち ⟨N⟩ 件——クリックで対応",
+        "Collapse sidebar": "サイドバーを畳む（⌘\\）",
+        "Expand sidebar": "サイドバーを展開（⌘\\）",
+        "Isolated worktrees (git)": "ワークツリー分離（git）",
+        "Each agent codes in its own copy of the repo; adopt the winning diff afterwards.":
+            "各エージェントが独立した作業コピーで実装し、勝者の差分を後から採用できます",
+        "The current project is not a git repository — worktree isolation is unavailable.":
+            "現在のプロジェクトは git リポジトリではないため、分離できません",
+        "Isolated worktree: ⟨PATH⟩": "分離ワークツリー：⟨PATH⟩",
+        "ADOPT THIS VERSION": "この版を採用",
+        "Apply this worktree's diff onto the project": "このワークツリーの差分をプロジェクトへ適用",
+        "Adopted into the project: ⟨STAT⟩": "プロジェクトへ適用しました：⟨STAT⟩",
+        "No changes to adopt.": "変更はありません",
+        "Applying…": "適用中…",
+        "ALWAYS": "常に",
+        "Auto-⟨ACTION⟩ when the command starts with '⟨PREFIX⟩'":
+            "コマンドが「⟨PREFIX⟩」で始まるとき自動で「⟨ACTION⟩」",
+        "AUTO RULES": "自動ルール",
+        "Rules apply per agent to matching tool approvals — remove anytime.":
+            "ルールはエージェント単位で一致するツール承認を自動処理します。いつでも削除可能",
+        "Remove this rule": "このルールを削除",
+        "Save a rule so matching approvals are answered automatically.":
+            "ルールを保存すると、同種の承認は自動で応答されます",
+        "no changes yet": "まだ変更なし…",
+        "Queue the next message — sent automatically when this round finishes…":
+            "次のメッセージを予約：このラウンド終了後に自動送信…",
+        "⟨N⟩ queued": "予約 ⟨N⟩",
+        "Clear queue": "クリックで予約をクリア",
         "EVIDENCE TIMELINE": "証拠タイムライン",
         "CHECKPOINT": "チェックポイント",
         "ACTIONS": "アクション",

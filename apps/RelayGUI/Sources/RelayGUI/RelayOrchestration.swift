@@ -8,6 +8,8 @@ final class RelayCompareRun: ObservableObject, Identifiable {
         let id: String
         let agentID: String
         let agentName: String
+        var worktreePath: String?
+        var baseCommit: String?
     }
 
     enum Phase: Equatable {
@@ -17,6 +19,14 @@ final class RelayCompareRun: ObservableObject, Identifiable {
     let id = UUID()
     @Published var selection: [String]
     @Published var prompt = ""
+    /// Run every member in its own detached git worktree (parallel
+    /// implementation without file stomping).
+    @Published var isolateWorktrees = false
+    @Published private(set) var setupHint: String?
+    @Published private(set) var diffStats: [String: String] = [:]
+    @Published private(set) var adoptMessages: [String: String] = [:]
+    private var statFetched: Set<String> = []
+    private var lastStatFetch: [String: Date] = [:]
     @Published private(set) var members: [Member] = []
     @Published private(set) var statuses: [String: RelayTaskStatus] = [:]
     @Published private(set) var outputs: [String: [RelayTaskOutput]] = [:]
@@ -73,10 +83,45 @@ final class RelayCompareRun: ObservableObject, Identifiable {
         }
     }
 
-    /// Called when the window closes: stop and release cached outputs.
+    /// Called when the window closes: stop, release caches, drop worktrees.
     func close() {
         stop()
         relay?.unpinOutputs(members.map(\.id))
+        if let project = relayCWD {
+            let resolved = RelayTerminalLauncher.resolvedWorkingDirectory(project)
+            let paths = members.compactMap(\.worktreePath)
+            Task.detached {
+                for path in paths {
+                    await RelayWorktree.remove(project: resolved, worktree: path)
+                }
+            }
+        }
+    }
+
+    /// Applies one member's worktree changes back onto the project.
+    func adoptChanges(of memberID: String) {
+        guard let relay,
+              let member = members.first(where: { $0.id == memberID }),
+              let worktree = member.worktreePath,
+              let base = member.baseCommit,
+              let project = relayCWD else { return }
+        let copy = RelayCopy(language: relay.language)
+        adoptMessages[memberID] = copy.text("Applying…")
+        let resolved = RelayTerminalLauncher.resolvedWorkingDirectory(project)
+        Task { [weak self] in
+            do {
+                let stat = try await RelayWorktree.adopt(
+                    worktree: worktree, base: base, into: resolved
+                )
+                self?.adoptMessages[memberID] = stat.isEmpty
+                    ? copy.text("No changes to adopt.")
+                    : copy.text("Adopted into the project: ⟨STAT⟩")
+                        .replacingOccurrences(of: "⟨STAT⟩", with: stat)
+            } catch {
+                self?.adoptMessages[memberID] =
+                    "\(copy.text("Failed:")) \(error.localizedDescription)"
+            }
+        }
     }
 
     func statusLabel(copy: RelayCopy) -> String {
@@ -143,18 +188,49 @@ final class RelayCompareRun: ObservableObject, Identifiable {
 
     private func run(chosen: [RelayAgent], prompt: String) async {
         guard let relay else { return }
-        relayCWD = relay.workingDirectory
+        relayCWD = relay.defaultWorkingDirectory
+        let copy = RelayCopy(language: relay.language)
+        let project = RelayTerminalLauncher.resolvedWorkingDirectory(
+            relay.defaultWorkingDirectory
+        )
+        if isolateWorktrees {
+            guard await RelayWorktree.isGitRepo(project) else {
+                setupHint = copy.text("The current project is not a git repository — worktree isolation is unavailable.")
+                phase = .setup
+                return
+            }
+        }
+        setupHint = nil
         let group = UUID().uuidString.lowercased()
         groupID = group
         var created: [Member] = []
         var startFailure: String?
-        for agent in chosen {
+        for (index, agent) in chosen.enumerated() {
             do {
+                var worktreePath: String?
+                var baseCommit: String?
+                var overrideCWD: String?
+                if isolateWorktrees {
+                    let destination = RelayWorktree.worktreeRoot
+                        .appendingPathComponent(
+                            String(id.uuidString.prefix(8)), isDirectory: true
+                        )
+                        .appendingPathComponent(
+                            "\(index + 1)-\(agent.id)", isDirectory: true
+                        )
+                    baseCommit = try await RelayWorktree.create(
+                        project: project, destination: destination
+                    )
+                    worktreePath = destination.path
+                    overrideCWD = destination.path
+                }
                 let taskID = try await relay.startGroupTask(
-                    agentID: agent.id, prompt: prompt, group: group
+                    agentID: agent.id, prompt: prompt, group: group,
+                    cwd: overrideCWD
                 )
                 created.append(Member(
-                    id: taskID, agentID: agent.id, agentName: agent.name
+                    id: taskID, agentID: agent.id, agentName: agent.name,
+                    worktreePath: worktreePath, baseCommit: baseCommit
                 ))
                 members = created
             } catch {
@@ -194,6 +270,25 @@ final class RelayCompareRun: ObservableObject, Identifiable {
                 outputs[member.id] = relay.groupOutputs[member.id] ?? []
                 if !snapshot.status.isTerminal {
                     allTerminal = false
+                    // Live scoreboard: refresh the running member's diffstat
+                    // every few seconds so parallel work is visible as it lands.
+                    if let worktree = member.worktreePath,
+                       let base = member.baseCommit,
+                       lastStatFetch[member.id].map({
+                           Date().timeIntervalSince($0) > 2.5
+                       }) ?? true {
+                        lastStatFetch[member.id] = Date()
+                        diffStats[member.id] = await RelayWorktree.shortStat(
+                            worktree: worktree, base: base
+                        )
+                    }
+                } else if let worktree = member.worktreePath,
+                          let base = member.baseCommit,
+                          !statFetched.contains(member.id) {
+                    statFetched.insert(member.id)
+                    diffStats[member.id] = await RelayWorktree.shortStat(
+                        worktree: worktree, base: base
+                    )
                 }
             }
             if allTerminal, !members.isEmpty {
@@ -224,6 +319,8 @@ final class RelayChainRun: ObservableObject, Identifiable {
     @Published var sequence: [String]
     @Published var prompt = ""
     @Published var note = ""
+    /// Follow-ups queued while a round is still running; sent automatically.
+    @Published private(set) var queuedFollowUps: [String] = []
     @Published private(set) var steps: [Step] = []
     @Published private(set) var outputs: [String: [RelayTaskOutput]] = [:]
     /// Steps currently waiting in USER GATE (answered in the approvals window).
@@ -320,6 +417,28 @@ final class RelayChainRun: ObservableObject, Identifiable {
         return !members.isEmpty && members.allSatisfy { $0.sessionID != nil }
     }
 
+    /// Queues or sends a follow-up: immediate when the chain is idle,
+    /// queued (FIFO) while a round is still running.
+    func submitFollowUp(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if case .completed = phase, queuedFollowUps.isEmpty {
+            continueRound(prompt: trimmed)
+        } else if isRunning || phase == .completed {
+            queuedFollowUps.append(trimmed)
+        }
+    }
+
+    func clearQueuedFollowUps() {
+        queuedFollowUps.removeAll()
+    }
+
+    private func drainQueueIfNeeded() {
+        guard case .completed = phase, !queuedFollowUps.isEmpty else { return }
+        let next = queuedFollowUps.removeFirst()
+        continueRound(prompt: next)
+    }
+
     /// Runs one more relay round through the same sequence: your new message
     /// goes to step 1, each later step receives the previous step's answer.
     /// Sessions are continued, so every step keeps its own memory.
@@ -397,6 +516,7 @@ final class RelayChainRun: ObservableObject, Identifiable {
             }
         }
         phase = .completed
+        drainQueueIfNeeded()
     }
 
     /// Re-mounts a window onto an existing daemon chain
@@ -450,6 +570,7 @@ final class RelayChainRun: ObservableObject, Identifiable {
                members.allSatisfy({ $0.status.isTerminal }) {
                 if members.allSatisfy({ $0.status == .completed }) {
                     phase = .completed
+                    drainQueueIfNeeded()
                 } else {
                     let detail = members.first { $0.status != .completed }?
                         .latestMessage ?? ""
@@ -612,6 +733,35 @@ struct RelayCompareWindow: View {
                 .buttonStyle(.plain)
             }
 
+            Button {
+                run.isolateWorktrees.toggle()
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(run.isolateWorktrees ? "▣" : "☐")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            run.isolateWorktrees ? RelayPalette.success : RelayPalette.muted
+                        )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("⎇ \(copy.text("Isolated worktrees (git)"))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                        Text(copy.text("Each agent codes in its own copy of the repo; adopt the winning diff afterwards."))
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if let hint = run.setupHint {
+                Text(hint)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+            }
+
             TextField(copy.text("Prompt sent to every selected agent"), text: $run.prompt, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11.5, design: .monospaced))
@@ -699,6 +849,53 @@ struct RelayCompareWindow: View {
                 Text(copy.text("Waiting for approval — respond in the approvals window."))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(RelayPalette.warning)
+            }
+            if let worktree = member.worktreePath {
+                HStack(spacing: 6) {
+                    Text("⎇")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.success)
+                        .help(copy.text("Isolated worktree: ⟨PATH⟩")
+                            .replacingOccurrences(of: "⟨PATH⟩", with: worktree))
+                    if let stat = run.diffStats[member.id] {
+                        Text(stat.isEmpty
+                             ? (status?.isTerminal == true
+                                ? copy.text("No changes to adopt.")
+                                : copy.text("no changes yet"))
+                             : stat)
+                            .font(.system(size: 8.5, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(
+                                stat.isEmpty
+                                    ? RelayPalette.muted
+                                    : status?.isTerminal == true
+                                        ? RelayPalette.success
+                                        : RelayPalette.signal
+                            )
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if status?.isTerminal == true,
+                       run.diffStats[member.id]?.isEmpty == false,
+                       run.adoptMessages[member.id] == nil {
+                        Button(copy.text("ADOPT THIS VERSION")) {
+                            run.adoptChanges(of: member.id)
+                        }
+                        .buttonStyle(ConsoleButtonStyle(
+                            tint: RelayPalette.success, prominent: true
+                        ))
+                        .help(copy.text("Apply this worktree's diff onto the project"))
+                    }
+                }
+                if let adopt = run.adoptMessages[member.id] {
+                    Text(adopt)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(
+                            adopt.hasPrefix(copy.text("Failed:"))
+                                ? RelayPalette.danger : RelayPalette.success
+                        )
+                        .textSelection(.enabled)
+                }
             }
             ScrollView {
                 RelayOutputLines(
@@ -894,7 +1091,7 @@ struct RelayChainWindow: View {
                 .foregroundStyle(statusColor)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
-            if case .completed = run.phase {
+            if run.isRunning || run.phase == .completed {
                 followUpBar
             }
         }
@@ -907,7 +1104,9 @@ struct RelayChainWindow: View {
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
                     .foregroundStyle(RelayPalette.warning)
                 TextField(
-                    copy.text("Continue the relay with a new message…"),
+                    copy.text(run.isRunning
+                        ? "Queue the next message — sent automatically when this round finishes…"
+                        : "Continue the relay with a new message…"),
                     text: $followUpDraft,
                     axis: .vertical
                 )
@@ -915,6 +1114,16 @@ struct RelayChainWindow: View {
                 .font(.system(size: 11.5, design: .monospaced))
                 .lineLimit(1...4)
                 .onSubmit(sendFollowUp)
+                if !run.queuedFollowUps.isEmpty {
+                    Button(copy.text("⟨N⟩ queued")
+                        .replacingOccurrences(
+                            of: "⟨N⟩", with: "\(run.queuedFollowUps.count)"
+                        )) {
+                        run.clearQueuedFollowUps()
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                    .help(copy.text("Clear queue"))
+                }
                 Button(copy.text("SEND")) {
                     sendFollowUp()
                 }
@@ -939,7 +1148,7 @@ struct RelayChainWindow: View {
         let text = followUpDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         followUpDraft = ""
-        run.continueRound(prompt: text)
+        run.submitFollowUp(text)
     }
 
     private var statusColor: SwiftUI.Color {
