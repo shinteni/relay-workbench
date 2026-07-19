@@ -3910,6 +3910,7 @@ struct RelayResultArbitrationDecisionDeck: View {
 
 struct RelayResultConfluenceDeck: View {
     @ObservedObject var store: RelayTerminalStore
+    @EnvironmentObject private var relay: RelayService
     let confluence: RelayResultConfluence
     @State private var arbitrationOpen: Bool
     @State private var arbitrationInstruction = ""
@@ -4213,6 +4214,8 @@ struct RelayResultConfluenceDeck: View {
             }
             .frame(height: 26)
 
+            daemonJudgeRow
+
             arbitrationPreflight
         }
         .padding(9)
@@ -4222,6 +4225,59 @@ struct RelayResultConfluenceDeck: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke((selectedTarget?.accent ?? RelayPalette.mix).opacity(0.34), lineWidth: 1)
         }
+    }
+
+    @ViewBuilder private var daemonJudgeRow: some View {
+        HStack(spacing: 7) {
+            Text("⚡")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.mix)
+            if let running = store.daemonArbitration {
+                Text(copy.text("⟨NAME⟩ is arbitrating — structured verdict, no terminal needed…")
+                    .replacingOccurrences(of: "⟨NAME⟩", with: running.judgeName))
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.mix)
+                Spacer(minLength: 4)
+                Button(copy.text("STOP")) {
+                    store.cancelDaemonArbitration()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
+            } else {
+                Menu {
+                    ForEach(relay.agents.filter(\.isAvailable)) { judge in
+                        Button(judge.name) {
+                            store.beginDaemonArbitration(
+                                relay: relay,
+                                judge: judge,
+                                instruction: arbitrationInstruction
+                            )
+                        }
+                    }
+                } label: {
+                    Text(copy.text("ONE-CLICK VERDICT"))
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .foregroundStyle(
+                    arbitrationPlan == nil ? RelayPalette.muted : RelayPalette.mix
+                )
+                .disabled(arbitrationPlan == nil)
+                .help(copy.text("Pick an agent to judge these results headlessly; the verdict comes back structured and sealable."))
+                Text(copy.text("no terminal · no Return"))
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                Spacer(minLength: 4)
+                if let failure = store.daemonArbitrationFailure {
+                    Text("\(copy.text("Failed:")) \(failure)")
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundStyle(RelayPalette.danger)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .frame(height: 20)
     }
 
     private var arbitrationPreflight: some View {

@@ -3042,6 +3042,84 @@ struct RelayTerminalTests {
         #expect(store.windowFrames.isEmpty)
     }
 
+    @Test
+    func roundtableMinutesMarkdownIncludesMetadataSpeakersAndModerator() {
+        let copy = RelayCopy(language: .chinese)
+        let markdown = RelayDialogueTranscript.markdown(
+            topic: "AGI 会有主体性吗",
+            participantNames: ["Claude", "Grok"],
+            rounds: 2,
+            statusLine: "对话完成",
+            messages: [
+                ("Claude", false, "开场观点"),
+                ("Grok", false, "回应观点"),
+                ("主持人", true, "请聚焦边界条件"),
+                ("Claude", false, "收尾"),
+            ],
+            generatedAt: Date(timeIntervalSince1970: 1_784_500_000),
+            copy: copy
+        )
+        #expect(markdown.contains("# 圆桌纪要: AGI 会有主体性吗"))
+        #expect(markdown.contains("Claude ⇄ Grok"))
+        #expect(markdown.contains("### 1 · Claude"))
+        #expect(markdown.contains("> **主持人**：请聚焦边界条件"))
+        #expect(markdown.contains("### 4 · Claude"))
+        #expect(markdown.contains("对话完成"))
+    }
+
+    @Test
+    func edgeSnapTargetsFireOnlyWhenFlushAgainstBounds() {
+        let size = CGSize(width: 1200, height: 800)
+        let area = RelayWindowGeometry.canvas(size)
+            .insetBy(dx: RelayWindowGeometry.margin, dy: RelayWindowGeometry.margin)
+        let halfWidth = (area.width - RelayWindowGeometry.tileGap) / 2
+        let halfHeight = (area.height - RelayWindowGeometry.tileGap) / 2
+
+        let flushLeft = CGRect(x: 0, y: 200, width: 400, height: 300)
+        #expect(RelayWindowGeometry.edgeSnapTarget(flushLeft, in: size)
+                == CGRect(x: area.minX, y: area.minY, width: halfWidth, height: area.height))
+
+        let flushTopRight = CGRect(x: 800, y: 0, width: 400, height: 300)
+        #expect(RelayWindowGeometry.edgeSnapTarget(flushTopRight, in: size)
+                == CGRect(
+                    x: area.minX + halfWidth + RelayWindowGeometry.tileGap,
+                    y: area.minY, width: halfWidth, height: halfHeight
+                ))
+
+        let centered = CGRect(x: 300, y: 200, width: 400, height: 300)
+        #expect(RelayWindowGeometry.edgeSnapTarget(centered, in: size) == nil)
+
+        let spanning = CGRect(x: 0, y: 200, width: 1200, height: 300)
+        #expect(RelayWindowGeometry.edgeSnapTarget(spanning, in: size) == nil)
+    }
+
+    @MainActor
+    @Test
+    func minimizedWindowsCollapseToDockAndRestoreOnActivate() {
+        let store = RelayTerminalStore()
+        store.reportWorkspaceSize(CGSize(width: 1200, height: 800))
+        let first = RelayDialogueRun(relay: nil, participants: ["claude", "codex"])
+        let second = RelayDialogueRun(relay: nil, participants: ["grok", "ollama"])
+        store.openDialogue(first)
+        store.openDialogue(second)
+
+        store.minimizeWindow(first.id)
+        #expect(store.minimizedWindows.contains(first.id))
+        #expect(store.focusedID == second.id)
+
+        store.minimizeWindow(second.id)
+        #expect(store.focusedID == nil)
+
+        store.arrangeAll()
+
+        store.activate(first.id)
+        #expect(!store.minimizedWindows.contains(first.id))
+        #expect(store.focusedID == first.id)
+
+        store.closeDialogue(second)
+        #expect(!store.minimizedWindows.contains(second.id))
+    }
+
     @MainActor
     @Test
     func approvalsWindowIsSingletonAndReopensByRaising() {

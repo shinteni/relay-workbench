@@ -266,6 +266,12 @@ struct RelayResultArbitrationReceipt: Codable, Equatable {
     }
 }
 
+/// A one-click daemon arbitration in flight (judge agent working headlessly).
+struct RelayDaemonArbitrationState: Equatable {
+    let judgeAgentID: String
+    let judgeName: String
+}
+
 struct RelayResultArbitrationDecision: Identifiable, Codable, Equatable {
     let id: UUID
     let receipt: RelayResultArbitrationReceipt
@@ -1607,6 +1613,14 @@ final class RelayTerminalStore: ObservableObject {
     /// Localization key for a transient sidebar notice.
     @Published private(set) var noticeKey: String?
     @Published private(set) var restorableDesk: RelayDeskSnapshot?
+    /// Windows collapsed into the bottom dock strip.
+    @Published private(set) var minimizedWindows: Set<UUID> = []
+    /// One-click daemon arbitration in flight, if any.
+    @Published private(set) var daemonArbitration: RelayDaemonArbitrationState?
+    @Published private(set) var daemonArbitrationFailure: String?
+    private var daemonArbitrationTask: Task<Void, Never>?
+    private var daemonArbitrationTaskID: String?
+    private weak var daemonArbitrationRelay: RelayService?
     private var zoomRestore: [UUID: CGRect] = [:]
     private var canvasSize: CGSize = .zero
     private var openSerial = 0
@@ -2173,6 +2187,98 @@ final class RelayTerminalStore: ObservableObject {
         promptStagingVisible = false
         noticeKey = nil
         return true
+    }
+
+    /// One-click arbitration: sends the exact arbitration payload to a
+    /// daemon agent, waits for its structured verdict, and presents the
+    /// decision directly — no live terminal, no manual Return.
+    @discardableResult
+    func beginDaemonArbitration(
+        relay: RelayService, judge: RelayAgent, instruction: String
+    ) -> Bool {
+        guard daemonArbitration == nil,
+              let confluence = resultConfluence,
+              let plan = RelayResultArbitration.plan(
+                  instruction: instruction, snapshots: confluence.snapshots
+              ) else { return false }
+        let parentCheckpointID = resultConfluenceReplayCheckpoint?.id
+        daemonArbitration = RelayDaemonArbitrationState(
+            judgeAgentID: judge.id, judgeName: judge.name
+        )
+        daemonArbitrationFailure = nil
+        daemonArbitrationRelay = relay
+        noticeKey = nil
+        daemonArbitrationTask = Task { [weak self, weak relay] in
+            guard let relay else { return }
+            do {
+                let taskID = try await relay.startDialogueTask(
+                    agentID: judge.id, prompt: plan.payload
+                )
+                self?.daemonArbitrationTaskID = taskID
+                while true {
+                    try Task.checkCancellation()
+                    try await Task.sleep(nanoseconds: 700_000_000)
+                    guard let snapshot = relay.taskSnapshot(taskID) else { continue }
+                    guard snapshot.status.isTerminal else { continue }
+                    if snapshot.status == .completed { break }
+                    self?.failDaemonArbitration(
+                        snapshot.latestMessage ?? snapshot.status.rawValue
+                    )
+                    return
+                }
+                let output = await relay.outputItems(taskID: taskID)
+                let verdict = ThreadCatalog.lastTurnAnswer(output)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let self, !verdict.isEmpty else {
+                    self?.failDaemonArbitration("empty verdict")
+                    return
+                }
+                let receipt = RelayResultArbitrationReceipt(
+                    confluence: confluence,
+                    plan: plan,
+                    targetID: UUID(),
+                    parentCheckpointID: parentCheckpointID
+                )
+                self.resultArbitrationDecision = RelayResultArbitrationDecision(
+                    receipt: receipt,
+                    result: RelayResultSnapshot(
+                        id: UUID(),
+                        agentName: judge.name,
+                        projectName: confluence.snapshots.first?.projectName ?? "",
+                        text: verdict
+                    )
+                )
+                self.resultConfluence = nil
+                self.resultConfluenceReplayCheckpoint = nil
+                self.resultArbitrationDecisionVisible = true
+                self.promptStagingVisible = false
+                self.daemonArbitration = nil
+                self.daemonArbitrationTaskID = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.failDaemonArbitration(error.localizedDescription)
+            }
+        }
+        return true
+    }
+
+    func cancelDaemonArbitration() {
+        daemonArbitrationTask?.cancel()
+        daemonArbitrationTask = nil
+        if let taskID = daemonArbitrationTaskID {
+            let relay = daemonArbitrationRelay
+            Task { await relay?.cancelBackgroundTask(taskID) }
+        }
+        daemonArbitration = nil
+        daemonArbitrationTaskID = nil
+        daemonArbitrationFailure = nil
+    }
+
+    private func failDaemonArbitration(_ message: String) {
+        daemonArbitration = nil
+        daemonArbitrationTaskID = nil
+        daemonArbitrationFailure = message
     }
 
     @discardableResult
@@ -3246,6 +3352,7 @@ final class RelayTerminalStore: ObservableObject {
     }
 
     private func unregisterWindow(_ id: UUID) {
+        minimizedWindows.remove(id)
         windowFrames.removeValue(forKey: id)
         zoomRestore.removeValue(forKey: id)
         zOrder.removeAll { $0 == id }
@@ -3411,6 +3518,7 @@ final class RelayTerminalStore: ObservableObject {
     /// Focuses a window and raises it to the top of the stack.
     func activate(_ id: UUID) {
         guard zOrder.contains(id) else { return }
+        minimizedWindows.remove(id)
         pendingOutputDates.removeValue(forKey: id)
         if attentionReturnTicket?.sessionID == id {
             attentionReturnTicket = nil
@@ -3423,6 +3531,18 @@ final class RelayTerminalStore: ObservableObject {
             zOrder.append(id)
             persistDesk()
         }
+    }
+
+    func minimizeWindow(_ id: UUID) {
+        guard zOrder.contains(id) else { return }
+        minimizedWindows.insert(id)
+        if focusedID == id {
+            focusedID = zOrder.last { !minimizedWindows.contains($0) }
+        }
+    }
+
+    func restoreWindow(_ id: UUID) {
+        activate(id)
     }
 
     func close(_ session: RelayTerminalSession) {
@@ -3526,9 +3646,11 @@ final class RelayTerminalStore: ObservableObject {
     func moveWindow(id: UUID, base: CGRect, translation: CGSize) {
         guard windowFrames[id] != nil else { return }
         zoomRestore.removeValue(forKey: id)
-        windowFrames[id] = RelayWindowGeometry.moved(
+        let moved = RelayWindowGeometry.moved(
             base, translation: translation, in: canvasSize
         )
+        windowFrames[id] = RelayWindowGeometry.edgeSnapTarget(moved, in: canvasSize)
+            ?? moved
         persistDesk()
     }
 
@@ -3561,7 +3683,7 @@ final class RelayTerminalStore: ObservableObject {
 
     /// Arranges all windows into a non-overlapping grid.
     func arrangeAll() {
-        let ids = zOrder
+        let ids = zOrder.filter { !minimizedWindows.contains($0) }
         let frames = RelayWindowGeometry.tiled(count: ids.count, in: canvasSize)
         guard frames.count == ids.count else { return }
         zoomRestore.removeAll()
@@ -3676,6 +3798,7 @@ final class RelayTerminalStore: ObservableObject {
         compares.removeAll()
         chains.removeAll()
         approvalPanel = nil
+        minimizedWindows.removeAll()
         windowFrames.removeAll()
         zoomRestore.removeAll()
         zOrder.removeAll()
@@ -3741,6 +3864,7 @@ struct RelayTerminalWorkspace: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 ForEach(store.orderedItems) { item in
+                    if !store.minimizedWindows.contains(item.id) {
                     switch item {
                     case .terminal(let session):
                         RelayTerminalWindow(
@@ -3785,6 +3909,7 @@ struct RelayTerminalWorkspace: View {
                             canvasSize: proxy.size,
                             focused: store.focusedID == panel.id
                         )
+                    }
                     }
                 }
                 if let pulse = store.attentionRoutePulse,
@@ -3941,11 +4066,62 @@ struct RelayTerminalWorkspace: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .overlay(alignment: .bottom) { dockStrip }
             .onAppear { store.reportWorkspaceSize(proxy.size) }
             .onChange(of: proxy.size) { _, size in
                 store.reportWorkspaceSize(size)
             }
         }
+    }
+
+    @ViewBuilder private var dockStrip: some View {
+        let minimized = store.zOrder.filter { store.minimizedWindows.contains($0) }
+        if !minimized.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(minimized, id: \.self) { id in
+                    if let item = store.orderedItems.first(where: { $0.id == id }) {
+                        dockChip(item)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RelayPalette.raised.opacity(0.8))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(RelayPalette.line, lineWidth: 1)
+            }
+            .padding(.bottom, 10)
+        }
+    }
+
+    private func dockChip(_ item: RelayWorkspaceItem) -> some View {
+        let (glyph, tint, title): (String, SwiftUI.Color, String) = {
+            switch item {
+            case .terminal(let session):
+                return ("▣", session.exited ? RelayPalette.danger : session.accent, session.agentName)
+            case .dialogue:
+                return ("⇄", RelayPalette.mix, copy.text("Dialogue"))
+            case .compare:
+                return ("⋈", RelayPalette.signal, copy.text("COMPARE"))
+            case .chain:
+                return ("›", RelayPalette.warning, copy.text("CHAIN"))
+            case .approvals:
+                return ("◇", RelayPalette.warning, copy.text("Approvals"))
+            }
+        }()
+        return Button {
+            store.restoreWindow(item.id)
+        } label: {
+            HStack(spacing: 4) {
+                Text(glyph)
+                    .foregroundStyle(tint)
+                Text(title)
+            }
+        }
+        .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+        .help(copy.text("Restore this window"))
     }
 
     private var emptyState: some View {
@@ -4471,6 +4647,15 @@ struct RelayFloatingWindow<Title: View, Controls: View, Content: View>: View {
             .background(headerDragArea)
             controls()
             Button {
+                store.minimizeWindow(windowID)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 8, weight: .bold))
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+            .help(copy.text("Minimize to the dock"))
+            Button {
                 toggleZoom()
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -4588,7 +4773,7 @@ private struct RelayTerminalWindow: View {
             Text(session.agentID.uppercased())
                 .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                 .tracking(1.1)
-                .foregroundStyle(session.accent)
+                .foregroundStyle(RelayPalette.text)
             if RelayTerminalContext.sidebarSubtitle(
                 cwd: session.cwd,
                 detail: detail

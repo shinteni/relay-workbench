@@ -109,6 +109,46 @@ enum RelayWindowGeometry {
         return frame
     }
 
+    /// Snap target when a moved window ends flush against a canvas edge:
+    /// one edge → that half, two adjacent edges → that quarter. Returns nil
+    /// unless the frame is pressed hard against the boundary (deliberate
+    /// shove), so ordinary repositioning never snaps by surprise.
+    static func edgeSnapTarget(_ frame: CGRect, in size: CGSize) -> CGRect? {
+        let full = canvas(size)
+        let area = full.insetBy(dx: margin, dy: margin)
+        guard area.width > 200, area.height > 200 else { return nil }
+        let epsilon: CGFloat = 0.5
+        let left = frame.minX - full.minX <= epsilon
+        let right = full.maxX - frame.maxX <= epsilon
+        let top = frame.minY - full.minY <= epsilon
+        let bottom = full.maxY - frame.maxY <= epsilon
+        if (left && right) || (top && bottom) { return nil }
+        let halfWidth = (area.width - tileGap) / 2
+        let halfHeight = (area.height - tileGap) / 2
+        let rightX = area.minX + halfWidth + tileGap
+        let bottomY = area.minY + halfHeight + tileGap
+        switch (left, right, top, bottom) {
+        case (true, false, true, false):
+            return CGRect(x: area.minX, y: area.minY, width: halfWidth, height: halfHeight)
+        case (false, true, true, false):
+            return CGRect(x: rightX, y: area.minY, width: halfWidth, height: halfHeight)
+        case (true, false, false, true):
+            return CGRect(x: area.minX, y: bottomY, width: halfWidth, height: halfHeight)
+        case (false, true, false, true):
+            return CGRect(x: rightX, y: bottomY, width: halfWidth, height: halfHeight)
+        case (true, false, false, false):
+            return CGRect(x: area.minX, y: area.minY, width: halfWidth, height: area.height)
+        case (false, true, false, false):
+            return CGRect(x: rightX, y: area.minY, width: halfWidth, height: area.height)
+        case (false, false, true, false):
+            return CGRect(x: area.minX, y: area.minY, width: area.width, height: halfHeight)
+        case (false, false, false, true):
+            return CGRect(x: area.minX, y: bottomY, width: area.width, height: halfHeight)
+        default:
+            return nil
+        }
+    }
+
     /// Staggered default frame for the n-th opened window.
     static func cascadeFrame(serial: Int, in size: CGSize) -> CGRect {
         let area = canvas(size)

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Builds the localized prompts that relay the table's recent messages to
@@ -52,6 +53,40 @@ enum RelayDialogueScript {
     }
 }
 
+/// Pure Markdown builder for roundtable minutes.
+enum RelayDialogueTranscript {
+    static func markdown(
+        topic: String,
+        participantNames: [String],
+        rounds: Int,
+        statusLine: String,
+        messages: [(speaker: String, isModerator: Bool, text: String)],
+        generatedAt: Date,
+        copy: RelayCopy
+    ) -> String {
+        var lines: [String] = []
+        lines.append("# \(copy.text("Roundtable minutes")): \(topic)")
+        lines.append("")
+        lines.append("- \(copy.text("PARTICIPANT")): \(participantNames.joined(separator: " ⇄ "))")
+        lines.append("- \(copy.text("Rounds per agent")): \(rounds) · \(statusLine)")
+        lines.append("- \(generatedAt.formatted(date: .abbreviated, time: .shortened))")
+        lines.append("")
+        lines.append("## \(copy.text("Transcript"))")
+        for (index, message) in messages.enumerated() {
+            lines.append("")
+            if message.isModerator {
+                lines.append("> **\(message.speaker)**：\(message.text)")
+            } else {
+                lines.append("### \(index + 1) · \(message.speaker)")
+                lines.append("")
+                lines.append(message.text)
+            }
+        }
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+}
+
 private enum RelayDialogueTurnError: Error {
     case emptyAnswer
     case taskFailed(String)
@@ -89,6 +124,8 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
     }
 
     static let maxParticipants = 4
+    /// Seat index used for the human moderator's interjections.
+    static let moderatorIndex = -1
 
     let id = UUID()
     @Published var participants: [String]
@@ -136,6 +173,21 @@ final class RelayDialogueRun: ObservableObject, Identifiable {
         engine = Task { [weak self] in
             await self?.runTurns(startingAt: 0, totalTurns: total)
         }
+    }
+
+    /// The moderator (you) speaks into the table; every participant sees the
+    /// message in their next-turn digest, then one more round runs.
+    func continueRound(moderatorMessage: String, moderatorName: String) {
+        guard case .completed = phase else { return }
+        let trimmed = moderatorMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        messages.append(Message(
+            participantIndex: Self.moderatorIndex,
+            agentID: "moderator",
+            agentName: moderatorName,
+            text: trimmed
+        ))
+        continueOneRound()
     }
 
     /// One more full round (one turn per participant) after completion.
@@ -331,6 +383,7 @@ struct RelayDialogueWindow: View {
     let frame: CGRect
     let canvasSize: CGSize
     let focused: Bool
+    @State private var moderatorDraft = ""
     @Environment(\.relayLanguage) private var language
 
     private var copy: RelayCopy { RelayCopy(language: language) }
@@ -399,14 +452,83 @@ struct RelayDialogueWindow: View {
                 .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
                 .disabled(run.resultSnapshots().isEmpty)
                 .help(copy.text("Fill these answers into live CLI terminals"))
+                Button(copy.text("EXPORT")) {
+                    exportTranscript()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .disabled(run.messages.isEmpty)
+                .help(copy.text("Save the transcript as a Markdown file"))
             }
         } content: {
             if case .setup = run.phase {
                 setupForm
             } else {
-                transcript
+                VStack(spacing: 0) {
+                    transcript
+                    if case .completed = run.phase {
+                        moderatorBar
+                    }
+                }
             }
         }
+    }
+
+    private var moderatorBar: some View {
+        HStack(spacing: 8) {
+            Text("›")
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.signal)
+            TextField(
+                copy.text("Speak as the moderator — starts one more round…"),
+                text: $moderatorDraft,
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 11.5, design: .monospaced))
+            .lineLimit(1...4)
+            .onSubmit(sendModeratorMessage)
+            Button(copy.text("SEND")) {
+                sendModeratorMessage()
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal, prominent: true))
+            .disabled(
+                moderatorDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(RelayPalette.raised.opacity(0.55))
+    }
+
+    private func exportTranscript() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+        let topic = run.topic.trimmingCharacters(in: .whitespacesAndNewlines)
+        panel.nameFieldStringValue =
+            "\(copy.text("Roundtable minutes"))-\(topic.prefix(24)).md"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let markdown = RelayDialogueTranscript.markdown(
+            topic: topic,
+            participantNames: run.participants.map { agentName($0) },
+            rounds: run.rounds,
+            statusLine: run.statusLabel(copy: copy),
+            messages: run.messages.map {
+                ($0.agentName, $0.participantIndex == RelayDialogueRun.moderatorIndex, $0.text)
+            },
+            generatedAt: Date(),
+            copy: copy
+        )
+        try? Data(markdown.utf8).write(to: url, options: .atomic)
+    }
+
+    private func sendModeratorMessage() {
+        let text = moderatorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        moderatorDraft = ""
+        run.continueRound(
+            moderatorMessage: text,
+            moderatorName: copy.text("Moderator")
+        )
     }
 
     private var setupForm: some View {

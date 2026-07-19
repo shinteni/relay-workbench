@@ -602,6 +602,20 @@ struct RelayCopy {
         "FORK TO TERMINALS": "分叉给终端",
         "Fill these answers into live CLI terminals":
             "把这些干净回答一次性填入 1–3 个开着的 CLI 终端（只填入，不执行）",
+        "Minimize to the dock": "最小化到底部停靠条",
+        "Restore this window": "恢复这个窗口",
+        "ONE-CLICK VERDICT": "一键裁决",
+        "⟨NAME⟩ is arbitrating — structured verdict, no terminal needed…":
+            "⟨NAME⟩ 裁决中——结构化结论，无需终端…",
+        "Pick an agent to judge these results headlessly; the verdict comes back structured and sealable.":
+            "选一个智能体在后台阅卷：结论结构化返回、可直接封存；不用开终端、不用按回车",
+        "no terminal · no Return": "无需终端 · 无需回车",
+        "Moderator": "主持人",
+        "Speak as the moderator — starts one more round…":
+            "以主持人身份发言：所有参与者都会看到，并开启新一轮…",
+        "Roundtable minutes": "圆桌纪要",
+        "Transcript": "转录",
+        "Save the transcript as a Markdown file": "把整场转录导出为 Markdown 文件",
         "EVIDENCE TIMELINE": "证据时间线",
         "CHECKPOINT": "检查点",
         "ACTIONS": "行动",
@@ -1279,6 +1293,20 @@ struct RelayCopy {
         "FORK TO TERMINALS": "ターミナルへフォーク",
         "Fill these answers into live CLI terminals":
             "これらの回答を稼働中の CLI ターミナルへ填入します（実行はしません）",
+        "Minimize to the dock": "下部ドックへ最小化",
+        "Restore this window": "このウィンドウを復元",
+        "ONE-CLICK VERDICT": "ワンクリック判定",
+        "⟨NAME⟩ is arbitrating — structured verdict, no terminal needed…":
+            "⟨NAME⟩ が判定中——構造化された結論、ターミナル不要…",
+        "Pick an agent to judge these results headlessly; the verdict comes back structured and sealable.":
+            "エージェントを選んでヘッドレスで判定。結論は構造化され、保存できます",
+        "no terminal · no Return": "ターミナル不要 · Return 不要",
+        "Moderator": "司会",
+        "Speak as the moderator — starts one more round…":
+            "司会として発言：全参加者に共有され、もう 1 ラウンド始まります…",
+        "Roundtable minutes": "円卓議事録",
+        "Transcript": "トランスクリプト",
+        "Save the transcript as a Markdown file": "トランスクリプトを Markdown として保存",
         "EVIDENCE TIMELINE": "証拠タイムライン",
         "CHECKPOINT": "チェックポイント",
         "ACTIONS": "アクション",

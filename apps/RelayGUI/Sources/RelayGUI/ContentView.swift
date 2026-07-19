@@ -383,10 +383,11 @@ struct ContentView: View {
                     glyph: "◇",
                     label: pendingInteractionIDs.isEmpty
                         ? copy.text("Approvals")
-                        : "\(copy.text("Approvals")) \(pendingInteractionIDs.count)"
+                        : "\(copy.text("Approvals")) \(pendingInteractionIDs.count)",
+                    glyphTint: RelayPalette.warning
                 )
             }
-            .buttonStyle(LinkActionButtonStyle(tint: RelayPalette.warning))
+            .buttonStyle(LinkActionButtonStyle(tint: RelayPalette.muted))
             .help(copy.text("Tasks that ask for tool approval or extra input show up here."))
             .overlay(alignment: .topTrailing) {
                 if !pendingInteractionIDs.isEmpty {
@@ -399,10 +400,13 @@ struct ContentView: View {
         }
     }
 
-    private func linkButtonLabel(glyph: String, label: String) -> some View {
+    private func linkButtonLabel(
+        glyph: String, label: String, glyphTint: Color
+    ) -> some View {
         VStack(spacing: 4) {
             Text(glyph)
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(glyphTint)
             Text(label)
                 .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                 .tracking(0.5)
@@ -419,9 +423,9 @@ struct ContentView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            linkButtonLabel(glyph: glyph, label: label)
+            linkButtonLabel(glyph: glyph, label: label, glyphTint: tint)
         }
-        .buttonStyle(LinkActionButtonStyle(tint: tint))
+        .buttonStyle(LinkActionButtonStyle(tint: RelayPalette.muted))
         .help(copy.text(helpKey))
         .disabled(relay.agents.allSatisfy { !$0.isAvailable })
     }
@@ -793,53 +797,6 @@ struct ContentView: View {
 
     private func projectDock(compact: Bool, minimal: Bool) -> some View {
         HStack(spacing: 0) {
-            ZStack(alignment: .bottom) {
-                Circle()
-                    .stroke(RelayPalette.signal.opacity(0.32), lineWidth: 5)
-                    .frame(width: 18, height: 18)
-                Circle()
-                    .fill(RelayPalette.signal)
-                    .frame(width: 6, height: 6)
-                Rectangle()
-                    .fill(RelayPalette.signal.opacity(0.38))
-                    .frame(width: 2, height: 15)
-                    .offset(y: 18)
-            }
-            .frame(width: 46, height: 38)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(projectName(relay.defaultWorkingDirectory))
-                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
-                    .foregroundStyle(RelayPalette.text)
-                    .lineLimit(1)
-                Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundStyle(RelayPalette.muted)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !minimal {
-                    Text(copy.text("New windows use this project"))
-                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                        .tracking(0.45)
-                        .foregroundStyle(RelayPalette.signal.opacity(0.9))
-                }
-            }
-
-            Spacer(minLength: 6)
-
-            Button {
-                openProjectPair()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "rectangle.split.2x1")
-                    Text(copy.text("PAIR"))
-                }
-                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-            }
-            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
-            .help(copy.text("Open Claude and Codex for this project"))
-            .accessibilityLabel(copy.text("Open Claude and Codex for this project"))
-
             Menu {
                 Section(copy.text("RECENT PROJECTS")) {
                     ForEach(relay.recentWorkingDirectories, id: \.self) { path in
@@ -859,17 +816,65 @@ struct ContentView: View {
                     chooseDirectory()
                 }
             } label: {
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 24, height: 28)
-                    .foregroundStyle(RelayPalette.signal)
-                    .background(RelayPalette.signal.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                HStack(spacing: 0) {
+                    ZStack(alignment: .bottom) {
+                        Circle()
+                            .stroke(RelayPalette.signal.opacity(0.32), lineWidth: 5)
+                            .frame(width: 18, height: 18)
+                        Circle()
+                            .fill(RelayPalette.signal)
+                            .frame(width: 6, height: 6)
+                        Rectangle()
+                            .fill(RelayPalette.signal.opacity(0.38))
+                            .frame(width: 2, height: 15)
+                            .offset(y: 18)
+                    }
+                    .frame(width: 46, height: 38)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(projectName(relay.defaultWorkingDirectory))
+                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                            .lineLimit(1)
+                        Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if !minimal {
+                            Text(copy.text("New windows use this project"))
+                                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                                .tracking(0.45)
+                                .foregroundStyle(RelayPalette.signal.opacity(0.9))
+                        }
+                    }
+
+                    Spacer(minLength: 6)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(RelayPalette.signal)
+                        .padding(.trailing, 7)
+                }
+                .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
-            .fixedSize()
+            .menuIndicator(.hidden)
             .help(copy.text("Switch project"))
             .accessibilityLabel(copy.text("Switch project"))
+
+            Button {
+                openProjectPair()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.split.2x1")
+                    Text(copy.text("PAIR"))
+                }
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+            .help(copy.text("Open Claude and Codex for this project"))
+            .accessibilityLabel(copy.text("Open Claude and Codex for this project"))
         }
         .padding(.vertical, compact ? 5 : 9)
         .padding(.trailing, 9)
