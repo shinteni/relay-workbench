@@ -33,6 +33,35 @@ struct RelayAgentActivity: Equatable {
     var hasWork: Bool { active > 0 || waiting > 0 }
 }
 
+struct RelayChainTemplate: Codable, Equatable, Identifiable {
+    let name: String
+    let agents: [String]
+    let note: String
+
+    var id: String { name }
+
+    static let defaultsKey = "chainTemplates"
+
+    static func load(from defaults: UserDefaults = .standard) -> [RelayChainTemplate] {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let templates = try? JSONDecoder().decode(
+                  [RelayChainTemplate].self,
+                  from: data
+              ) else {
+            return []
+        }
+        return templates
+    }
+
+    static func store(
+        _ templates: [RelayChainTemplate],
+        to defaults: UserDefaults = .standard
+    ) {
+        guard let data = try? JSONEncoder().encode(templates) else { return }
+        defaults.set(data, forKey: defaultsKey)
+    }
+}
+
 struct RelayTaskGroup: Identifiable {
     let cwd: String
     let tasks: [RelayTask]
@@ -108,6 +137,16 @@ enum ThreadCatalog {
         return (agent.id, instruction)
     }
 
+    static func lastTurnAnswer(_ output: [RelayTaskOutput]) -> String {
+        let startIndex = output.lastIndex { $0.kind == .user }
+        let turn = startIndex.map { Array(output[($0 + 1)...]) } ?? output
+        return turn
+            .filter { $0.kind == .assistant }
+            .map(\.text)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func transcriptText(_ output: [RelayTaskOutput], limitBytes: Int = 100_000) -> String {
         var lines: [String] = []
         for item in output {
@@ -131,6 +170,24 @@ enum ThreadCatalog {
             suffix.removeFirst()
         }
         return "…" + String(decoding: suffix, as: UTF8.self)
+    }
+
+    static func elapsedLabel(
+        createdAtMilliseconds: UInt64,
+        updatedAtMilliseconds: UInt64,
+        isTerminal: Bool,
+        nowMilliseconds: UInt64
+    ) -> String {
+        let end = isTerminal ? updatedAtMilliseconds : max(nowMilliseconds, createdAtMilliseconds)
+        let seconds = Int(end.subtractingReportingOverflow(createdAtMilliseconds).partialValue / 1000)
+        guard seconds >= 0 else { return "" }
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        if seconds < 3600 {
+            return String(format: "%dm%02ds", seconds / 60, seconds % 60)
+        }
+        return String(format: "%dh%02dm", seconds / 3600, (seconds % 3600) / 60)
     }
 
     static func activity(_ tasks: [RelayTask], agentID: String) -> RelayAgentActivity {

@@ -131,6 +131,16 @@ fn run() -> Result<()> {
     )
 }
 
+fn configured_option<'a>(
+    options: &'a std::collections::BTreeMap<String, String>,
+    key: &str,
+) -> Option<&'a str> {
+    options
+        .get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty() && *value != "default" && *value != "auto")
+}
+
 fn run_turn(
     request: &AdapterRunRequest,
     receiver: &Receiver<ProcessEvent>,
@@ -170,6 +180,16 @@ fn run_turn(
     if let Some(session_id) = &request.session_id {
         thread_params["threadId"] = Value::String(session_id.clone());
     }
+    let chosen_model = configured_option(&request.options, "codex_model");
+    let chosen_effort = configured_option(&request.options, "codex_reasoning_effort");
+    if request.session_id.is_none() {
+        if let Some(model) = chosen_model {
+            thread_params["model"] = Value::String(model.to_owned());
+        }
+        if let Some(effort) = chosen_effort {
+            thread_params["modelReasoningEffort"] = Value::String(effort.to_owned());
+        }
+    }
     send_message(
         app_stdin,
         &json!({ "id": 2, "method": thread_method, "params": thread_params }),
@@ -202,7 +222,7 @@ fn run_turn(
         }
         turn_params["collaborationMode"] = json!({
             "mode": "plan",
-            "settings": { "model": model }
+            "settings": { "model": chosen_model.unwrap_or(model) }
         });
     }
     send_message(

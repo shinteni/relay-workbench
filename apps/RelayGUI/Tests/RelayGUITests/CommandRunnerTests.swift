@@ -19,6 +19,47 @@ struct CommandRunnerTests {
     }
 }
 
+struct RelayProjectHistoryTests {
+    @Test
+    func loadsOnlyExistingDirectoriesWithCurrentProjectFirst() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RelayProjectHistoryTests-\(UUID().uuidString)")
+        let current = root.appendingPathComponent("current")
+        let previous = root.appendingPathComponent("previous")
+        try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: previous, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let suiteName = "RelayProjectHistoryTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            Issue.record("could not create isolated defaults")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set([
+            previous.path,
+            root.appendingPathComponent("missing").path,
+            current.path,
+        ], forKey: RelayProjectHistory.defaultsKey)
+
+        #expect(RelayProjectHistory.load(
+            currentDirectory: current.path,
+            defaults: defaults
+        ) == [current.path, previous.path])
+    }
+
+    @Test
+    func recordingMovesProjectToFrontDeduplicatesAndCapsAtSix() {
+        let paths = (0..<7).map { "/tmp/relay-project-\($0)" }
+        let recorded = RelayProjectHistory.recording(paths[4], in: paths)
+
+        #expect(recorded.count == RelayProjectHistory.limit)
+        #expect(recorded.first == paths[4])
+        #expect(recorded.filter { $0 == paths[4] }.count == 1)
+        #expect(recorded == [paths[4], paths[0], paths[1], paths[2], paths[3], paths[5]])
+    }
+}
+
 struct DaemonLaunchConfigurationTests {
     @Test
     func readsExecutableFromLaunchAgentPropertyList() throws {

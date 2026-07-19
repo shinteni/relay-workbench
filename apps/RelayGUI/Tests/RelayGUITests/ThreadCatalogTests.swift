@@ -81,6 +81,41 @@ struct ThreadCatalogTests {
     }
 
     @Test
+    func elapsedLabelsUseCompactUnitsAndLiveEndpointForActiveTasks() {
+        #expect(ThreadCatalog.elapsedLabel(
+            createdAtMilliseconds: 1_000, updatedAtMilliseconds: 5_400,
+            isTerminal: true, nowMilliseconds: 99_000
+        ) == "4s")
+        #expect(ThreadCatalog.elapsedLabel(
+            createdAtMilliseconds: 0, updatedAtMilliseconds: 128_000,
+            isTerminal: true, nowMilliseconds: 0
+        ) == "2m08s")
+        #expect(ThreadCatalog.elapsedLabel(
+            createdAtMilliseconds: 0, updatedAtMilliseconds: 3_780_000,
+            isTerminal: true, nowMilliseconds: 0
+        ) == "1h03m")
+        #expect(ThreadCatalog.elapsedLabel(
+            createdAtMilliseconds: 1_000, updatedAtMilliseconds: 2_000,
+            isTerminal: false, nowMilliseconds: 31_000
+        ) == "30s")
+    }
+
+    @Test
+    func chainTemplatesRoundTripThroughDefaults() {
+        let defaults = UserDefaults(suiteName: "relay-template-tests")!
+        defaults.removePersistentDomain(forName: "relay-template-tests")
+        let templates = [
+            RelayChainTemplate(name: "起草精修", agents: ["ollama", "claude"], note: "精修以下草稿"),
+            RelayChainTemplate(name: "写码审查", agents: ["codex", "claude"], note: ""),
+        ]
+
+        RelayChainTemplate.store(templates, to: defaults)
+
+        #expect(RelayChainTemplate.load(from: defaults) == templates)
+        #expect(RelayChainTemplate.load(from: UserDefaults(suiteName: "relay-empty-tests")!).isEmpty)
+    }
+
+    @Test
     func parsesExplicitHandoffAndRejectsUnknownAgent() {
         let agents = [agent(id: "codex"), agent(id: "claude")]
 

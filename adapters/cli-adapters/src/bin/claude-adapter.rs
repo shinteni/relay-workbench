@@ -52,6 +52,20 @@ fn run() -> Result<()> {
         OsString::from("--permission-mode"),
         OsString::from("auto"),
     ];
+    if let Some(model) = request
+        .options
+        .get("claude_model")
+        .filter(|value| !value.is_empty() && *value != "default")
+    {
+        arguments.extend([OsString::from("--model"), OsString::from(model)]);
+    }
+    if let Some(effort) = request
+        .options
+        .get("claude_effort")
+        .filter(|value| !value.is_empty() && *value != "default")
+    {
+        arguments.extend([OsString::from("--effort"), OsString::from(effort)]);
+    }
     if request.session_id.is_some() {
         arguments.extend([OsString::from("--resume"), OsString::from(&session_id)]);
     } else {

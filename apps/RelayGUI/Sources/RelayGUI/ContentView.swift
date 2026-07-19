@@ -3,18 +3,58 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 enum RelayPalette {
-    static let ink = Color(red: 0.035, green: 0.043, blue: 0.055)
-    static let panel = Color(red: 0.061, green: 0.073, blue: 0.091)
-    static let raised = Color(red: 0.088, green: 0.104, blue: 0.128)
-    static let line = Color.white.opacity(0.09)
-    static let text = Color(red: 0.89, green: 0.91, blue: 0.94)
-    static let muted = Color(red: 0.50, green: 0.55, blue: 0.62)
+    static let ink = Color(red: 0.051, green: 0.051, blue: 0.055)
+    static let panel = Color(red: 0.082, green: 0.082, blue: 0.086)
+    static let raised = Color(red: 0.114, green: 0.114, blue: 0.120)
+    static let hover = Color.white.opacity(0.05)
+    static let line = Color.white.opacity(0.07)
+    static let text = Color(red: 0.92, green: 0.92, blue: 0.93)
+    static let muted = Color(red: 0.60, green: 0.60, blue: 0.63)
     static let signal = Color(red: 0.35, green: 0.65, blue: 1.0)
     static let success = Color(red: 0.44, green: 0.84, blue: 0.61)
     static let warning = Color(red: 0.95, green: 0.72, blue: 0.29)
     static let danger = Color(red: 1.0, green: 0.42, blue: 0.49)
     static let claude = Color(red: 0.89, green: 0.52, blue: 0.34)
     static let mix = Color(red: 0.72, green: 0.52, blue: 1.0)
+
+    static let pressSpring = Animation.spring(response: 0.25, dampingFraction: 1.0)
+    static let selectSpring = Animation.spring(response: 0.3, dampingFraction: 1.0)
+}
+
+struct RelayMaterial: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .sidebar
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = material
+    }
+}
+
+extension RelayAgent {
+    var accent: Color {
+        switch id {
+        case "claude": RelayPalette.claude
+        case "codex": RelayPalette.signal
+        case "mix": RelayPalette.mix
+        case "ollama": RelayPalette.success
+        default:
+            [
+                RelayPalette.signal, RelayPalette.mix,
+                RelayPalette.claude, RelayPalette.success,
+            ][abs(id.hashValue) % 4]
+        }
+    }
+
+    var monogram: String {
+        String(name.prefix(2)).uppercased()
+    }
 }
 
 private extension RelayTaskStatus {
@@ -95,6 +135,10 @@ struct ContentView: View {
     @State private var renameDraft = ""
     @State private var showingAdapterManager = false
     @State private var focusedCompareMemberID: String?
+    @State private var hasAutoFocusedComposer = false
+    @State private var showingSaveTemplate = false
+    @State private var chainTemplateName = ""
+    @StateObject private var terminals = RelayTerminalStore()
     @FocusState private var promptFocused: Bool
     @FocusState private var renameFocused: Bool
     let openSettings: () -> Void
@@ -105,21 +149,49 @@ struct ContentView: View {
 
     private var copy: RelayCopy { RelayCopy(language: relay.language) }
 
+    private var pendingInteractionIDs: [String] {
+        relay.tasks.compactMap { $0.pendingInteraction?.id }
+    }
+
+    private var workspaceAccent: Color {
+        let agentID = relay.selectedTask?.adapterID ?? relay.selectedAgentID
+        return relay.agents.first { $0.id == agentID }?.accent ?? RelayPalette.signal
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
                 .frame(width: 310)
+                .background(RelayMaterial(material: .sidebar))
 
             Rectangle()
                 .fill(RelayPalette.line)
                 .frame(width: 1)
 
-            workspace
+            RelayTerminalWorkspace(
+                store: terminals,
+                agents: relay.agents,
+                onRestoreDesk: restoreDesk
+            )
         }
-        .background(RelayPalette.ink)
+        .background {
+            ZStack {
+                RelayMaterial(material: .underWindowBackground)
+                Color.black.opacity(0.38)
+            }
+            .ignoresSafeArea()
+        }
         .foregroundStyle(RelayPalette.text)
         .font(.system(.body, design: .monospaced))
-        .onAppear { promptFocused = true }
+        .onAppear {
+            DispatchQueue.main.async { promptFocused = true }
+        }
+        .onChange(of: relay.canSubmit) { _, canSubmit in
+            if canSubmit, !hasAutoFocusedComposer {
+                hasAutoFocusedComposer = true
+                promptFocused = true
+            }
+        }
         .onChange(of: relay.selectedTaskID) { _, selectedTaskID in
             if renamingTaskID != selectedTaskID {
                 cancelRename()
@@ -127,6 +199,21 @@ struct ContentView: View {
             if focusedCompareMemberID != selectedTaskID {
                 focusedCompareMemberID = nil
             }
+        }
+        .onChange(of: pendingInteractionIDs) { _, ids in
+            if !ids.isEmpty {
+                terminals.openApprovals()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification
+        )) { _ in
+            terminals.markFocusedOutputReviewed()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSWindow.didBecomeKeyNotification
+        )) { _ in
+            terminals.markFocusedOutputReviewed()
         }
         .alert(item: $pendingDeletionTask) { task in
             Alert(
@@ -142,23 +229,246 @@ struct ContentView: View {
             AdapterManagerView()
                 .environmentObject(relay)
         }
+        .alert(copy.text("Save this route as a template"), isPresented: $showingSaveTemplate) {
+            TextField(copy.text("Template name"), text: $chainTemplateName)
+            Button(copy.text("SAVE")) {
+                relay.saveChainTemplate(named: chainTemplateName)
+            }
+            Button(copy.text("Cancel"), role: .cancel) {}
+        }
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Text(">")
-                        .foregroundStyle(RelayPalette.signal)
-                    Text("RELAY_")
-                        .font(.system(size: 17, weight: .bold, design: .monospaced))
-                        .tracking(0.8)
+        GeometryReader { proxy in
+            sidebarContent(
+                compact: proxy.size.height < 800,
+                minimal: proxy.size.height < 700
+            )
+        }
+    }
+
+    private func openTerminal(agent: RelayAgent) {
+        terminals.open(agent: agent, cwd: relay.defaultWorkingDirectory) { key in
+            agent.options.first { $0.key == key }.map {
+                relay.agentOptionValue(agentID: agent.id, option: $0)
+            }
+        }
+    }
+
+    private func restoreDesk() {
+        animateWorkspaceChange {
+            terminals.restoreDesk(agents: relay.agents) { agent, key in
+                agent.options.first { $0.key == key }.map {
+                    relay.agentOptionValue(agentID: agent.id, option: $0)
                 }
-                daemonBadge
+            }
+        }
+    }
+
+    private func animateWorkspaceChange(_ changes: () -> Void) {
+        if reduceMotion {
+            changes()
+        } else {
+            withAnimation(.spring(response: 0.4, dampingFraction: 1.0), changes)
+        }
+    }
+
+    private var promptStagingControlHelp: String {
+        if terminals.contextRelayDraft != nil {
+            return copy.text("Close context fork before opening prompt stage")
+        }
+        if terminals.resultConfluence != nil {
+            return copy.text("Close result confluence before opening prompt stage")
+        }
+        guard terminals.promptReviewPlan != nil else {
+            return copy.text("Fill one prompt into several terminals without running it")
+        }
+        if terminals.promptStagingVisible {
+            return copy.text("Hide prompt review; progress is kept")
+        }
+        if terminals.promptReviewPendingCount == 0 {
+            return copy.text("Open completed prompt review")
+        }
+        return copy.text("Resume prompt review · ⟨N⟩ left")
+            .replacingOccurrences(of: "⟨N⟩", with: "\(terminals.promptReviewPendingCount)")
+    }
+
+    /// Default agent pairing for orchestration windows: Claude then Codex
+    /// when available, otherwise the first two available agents.
+    private var defaultAgentPair: [String] {
+        let available = relay.agents.filter(\.isAvailable)
+        guard let fallback = available.first else { return [] }
+        let first = available.first { $0.id == "claude" } ?? fallback
+        let second = available.first { $0.id == "codex" && $0.id != first.id }
+            ?? available.first { $0.id != first.id }
+            ?? first
+        return first.id == second.id ? [first.id] : [first.id, second.id]
+    }
+
+    private func openDialogue(preferredA: String? = nil) {
+        var pair = defaultAgentPair
+        if let preferredA {
+            pair.removeAll { $0 == preferredA }
+            pair.insert(preferredA, at: 0)
+        }
+        guard let first = pair.first else { return }
+        terminals.openDialogue(RelayDialogueRun(
+            relay: relay,
+            agentAID: first,
+            agentBID: pair.count > 1 ? pair[1] : first
+        ))
+    }
+
+    /// First-class entry points for the app's namesake linking features.
+    private var linkActions: some View {
+        HStack(spacing: 6) {
+            linkButton(
+                glyph: "⇄", label: copy.text("Dialogue"), tint: RelayPalette.mix,
+                helpKey: "Open a dialogue between two agents"
+            ) { openDialogue() }
+            linkButton(
+                glyph: "⋈", label: copy.text("COMPARE"), tint: RelayPalette.signal,
+                helpKey: "Send one prompt to several agents"
+            ) { openCompare() }
+            linkButton(
+                glyph: "›", label: copy.text("CHAIN"), tint: RelayPalette.warning,
+                helpKey: "Relay the answer through steps"
+            ) { openChain() }
+            Button {
+                terminals.openApprovals()
+            } label: {
+                linkButtonLabel(
+                    glyph: "◇",
+                    label: pendingInteractionIDs.isEmpty
+                        ? copy.text("Approvals")
+                        : "\(copy.text("Approvals")) \(pendingInteractionIDs.count)"
+                )
+            }
+            .buttonStyle(LinkActionButtonStyle(tint: RelayPalette.warning))
+            .help(copy.text("Tasks that ask for tool approval or extra input show up here."))
+            .overlay(alignment: .topTrailing) {
+                if !pendingInteractionIDs.isEmpty {
+                    Circle()
+                        .fill(RelayPalette.danger)
+                        .frame(width: 6, height: 6)
+                        .offset(x: -3, y: 3)
+                }
+            }
+        }
+    }
+
+    private func linkButtonLabel(glyph: String, label: String) -> some View {
+        VStack(spacing: 4) {
+            Text(glyph)
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+            Text(label)
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .tracking(0.5)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func linkButton(
+        glyph: String,
+        label: String,
+        tint: Color,
+        helpKey: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            linkButtonLabel(glyph: glyph, label: label)
+        }
+        .buttonStyle(LinkActionButtonStyle(tint: tint))
+        .help(copy.text(helpKey))
+        .disabled(relay.agents.allSatisfy { !$0.isAvailable })
+    }
+
+    private func openCompare() {
+        guard !defaultAgentPair.isEmpty else { return }
+        terminals.openCompare(RelayCompareRun(
+            relay: relay,
+            preselected: defaultAgentPair
+        ))
+    }
+
+    private func openChain() {
+        guard !defaultAgentPair.isEmpty else { return }
+        terminals.openChain(RelayChainRun(
+            relay: relay,
+            preselected: defaultAgentPair
+        ))
+    }
+
+    private func agentRail(compact: Bool) -> some View {
+        let anyActive = relay.tasks.contains { !$0.status.isTerminal }
+        return RoundedRectangle(cornerRadius: 1)
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.03),
+                        Color.white.opacity(anyActive ? 0.26 : 0.20),
+                        Color.white.opacity(anyActive ? 0.26 : 0.20),
+                        Color.white.opacity(0.03),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+            .frame(width: 2)
+            .overlay {
+                if anyActive, !reduceMotion {
+                    TimelineView(.animation(minimumInterval: 1 / 30)) { context in
+                        let phase = context.date.timeIntervalSinceReferenceDate
+                            .truncatingRemainder(dividingBy: 2.2) / 2.2
+                        GeometryReader { proxy in
+                            Capsule()
+                                .fill(workspaceAccent.opacity(0.9))
+                                .frame(width: 2, height: 24)
+                                .offset(y: (proxy.size.height + 24) * phase - 24)
+                        }
+                    }
+                    .clipped()
+                }
+            }
+            .padding(.leading, 33)
+            .padding(.vertical, compact ? 14 : 22)
+            .allowsHitTesting(false)
+    }
+
+    private func sidebarContent(compact: Bool, minimal: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Text(">")
+                            .font(.system(size: 19, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.signal)
+                        Text("RELAY_")
+                            .font(.system(size: 20, weight: .bold, design: .monospaced))
+                            .tracking(-0.2)
+                    }
+                    daemonBadge
+                }
+                Spacer()
+                Button {
+                    openSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Open Relay settings"))
             }
             .padding(.horizontal, 18)
-            .padding(.top, 38)
-            .padding(.bottom, 18)
+            .padding(.top, compact ? 22 : 38)
+            .padding(.bottom, compact ? 10 : 18)
+
+            sectionLabel(copy.text("PROJECT"))
+            projectDock(compact: compact, minimal: minimal)
+                .padding(.horizontal, 10)
+                .padding(.top, 2)
+                .padding(.bottom, compact ? 8 : 12)
 
             HStack {
                 sectionLabel(copy.text("AGENTS"))
@@ -168,54 +478,28 @@ struct ContentView: View {
                 }
                 .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
                 .help(copy.text("Manage adapter manifests"))
-                Button {
-                    openSettings()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .frame(width: 12, height: 12)
-                }
-                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                .help(copy.text("Open Relay settings"))
-                Button(copy.text("NEW THREAD")) {
-                    relay.startNewThread()
-                    promptFocused = true
-                }
-                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
-                .padding(.trailing, 12)
+                Spacer()
+                    .frame(width: 12)
             }
 
-            agentModeBar
-
-            if relay.chainMode {
-                chainRouteBuilder
-            }
-
-            VStack(spacing: 4) {
-                ForEach(relay.agents) { agent in
-                    AgentRow(
-                        agent: agent,
-                        activity: ThreadCatalog.activity(relay.tasks, agentID: agent.id),
-                        selected: relay.selectedAgentID == agent.id && relay.selectedTaskID == nil
-                            && !relay.compareMode && !relay.chainMode,
-                        compare: relay.compareMode,
-                        checked: relay.compareSelection.contains(agent.id),
-                        chain: relay.chainMode,
-                        chainSteps: relay.chainSequence.enumerated().compactMap { index, id in
-                            id == agent.id ? index + 1 : nil
+            ZStack(alignment: .topLeading) {
+                agentRail(compact: compact)
+                VStack(spacing: compact ? 2 : 4) {
+                    ForEach(relay.agents) { agent in
+                        AgentRow(
+                            agent: agent,
+                            activity: ThreadCatalog.activity(relay.tasks, agentID: agent.id),
+                            selected: terminals.sessions.contains { $0.agentID == agent.id },
+                            terminalCount: terminals.sessions.filter { $0.agentID == agent.id }.count,
+                            compact: compact,
+                            onStartDialogue: { openDialogue(preferredA: agent.id) }
+                        ) {
+                            openTerminal(agent: agent)
                         }
-                    ) {
-                        if relay.compareMode {
-                            relay.toggleCompareAgent(agent.id)
-                        } else if relay.chainMode {
-                            relay.appendChainAgent(agent.id)
-                        } else {
-                            relay.selectAgent(agent.id)
-                        }
-                        promptFocused = true
                     }
                 }
+                .padding(.horizontal, 10)
             }
-            .padding(.horizontal, 10)
             .padding(.bottom, 8)
 
             Rectangle()
@@ -223,73 +507,209 @@ struct ContentView: View {
                 .frame(height: 1)
                 .padding(.vertical, 8)
 
+            sectionLabel(copy.text("LINK"))
+            linkActions
+                .padding(.horizontal, 10)
+                .padding(.top, 2)
+                .padding(.bottom, 6)
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+                .padding(.vertical, 8)
+
             HStack {
-                sectionLabel(copy.text("THREADS"))
+                sectionLabel(copy.text("WINDOWS"))
+                if terminals.sessions.contains(where: { !$0.exited }) {
+                    Button {
+                        animateWorkspaceChange { terminals.togglePromptStaging() }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: terminals.promptReviewPlan == nil
+                                ? "tray.and.arrow.down"
+                                : "tray.full.fill")
+                            if terminals.promptReviewPlan != nil {
+                                if terminals.promptReviewPendingCount > 0 {
+                                    Text("\(terminals.promptReviewPendingCount)")
+                                        .monospacedDigit()
+                                } else {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .frame(minWidth: 16)
+                        .frame(height: 16)
+                    }
+                    .buttonStyle(ConsoleButtonStyle(
+                        tint: terminals.promptStagingVisible
+                            ? RelayPalette.mix
+                            : terminals.promptReviewPlan == nil
+                                ? RelayPalette.muted : RelayPalette.warning
+                    ))
+                    .disabled(
+                        terminals.contextRelayDraft != nil
+                            || terminals.resultConfluence != nil
+                    )
+                    .help(promptStagingControlHelp)
+                    .accessibilityLabel(promptStagingControlHelp)
+                }
+                terminalAttentionRouter
+                terminalAttentionReturn
                 Spacer()
-                Text(hasThreadQuery
-                     ? "\(filteredTaskCount)/\(relay.tasks.count)"
-                     : "\(relay.tasks.count)")
+                if terminals.sessions.isEmpty, terminals.restorableDesk != nil {
+                    Button(copy.text("RESTORE")) {
+                        restoreDesk()
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+                    .help(copy.text("Restore the previous CLI desk"))
+                }
+                if terminals.zOrder.count > 1 {
+                    Button(copy.text("TILE")) {
+                        animateWorkspaceChange { terminals.arrangeAll() }
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                    .help(copy.text("Arrange all windows in a grid"))
+                }
+                Text("\(terminals.zOrder.count)")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundStyle(RelayPalette.muted)
                     .padding(.trailing, 18)
             }
 
-            if relay.tasks.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("┌─ \(copy.text("NO THREADS"))")
-                    Text("│ \(copy.text("Pick an agent"))")
-                    Text("└─ \(copy.text("and enter a task"))")
+            if !terminals.savedDecisionCheckpoints.isEmpty
+                || terminals.decisionArchiveRejectedCount > 0 {
+                Button {
+                    animateWorkspaceChange { terminals.showDecisionLibrary() }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "archivebox.fill")
+                            .foregroundStyle(RelayPalette.mix)
+                        Text(copy.text("DECISIONS"))
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .tracking(0.7)
+                        Spacer()
+                        Text("\(terminals.savedDecisionCheckpoints.count)")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .monospacedDigit()
+                            .foregroundStyle(RelayPalette.mix)
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(height: 28)
+                    .background(RelayPalette.mix.opacity(0.07))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(RelayPalette.mix.opacity(0.22), lineWidth: 1)
+                    }
                 }
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(RelayPalette.muted)
-                .padding(18)
-            } else {
-                threadStatusBar
-                threadSearch
+                .buttonStyle(.plain)
+                .disabled(
+                    terminals.contextRelayDraft != nil
+                        || terminals.resultConfluence != nil
+                        || terminals.promptStagingVisible
+                        || terminals.resultArbitrationDecisionVisible
+                )
+                .help(copy.text("OPEN DECISION LIBRARY"))
+                .padding(.horizontal, 10)
+                .padding(.top, 7)
+            }
 
-                if taskGroups.isEmpty {
+            if let noticeKey = terminals.noticeKey {
+                Text(copy.text(noticeKey))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 8)
+            }
+
+            if terminals.zOrder.isEmpty {
+                if minimal {
+                    Text("└─ \(copy.text("NO WINDOWS"))")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
+                } else {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(hasThreadQuery
-                             ? "┌─ \(copy.text("NO MATCHES"))"
-                             : "┌─ \(copy.threadFilter(threadFilter))")
-                        Text(hasThreadQuery
-                             ? "│ \(copy.text("Change the search"))"
-                             : "│ \(copy.text("No threads with this status"))")
-                        Button(hasThreadQuery
-                               ? "└─ \(copy.text("CLEAR SEARCH"))"
-                               : "└─ \(copy.text("SHOW ALL"))") {
-                            if hasThreadQuery {
-                                threadQuery = ""
-                            } else {
-                                threadFilter = .all
-                            }
-                        }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(RelayPalette.signal)
+                        Text("┌─ \(copy.text("NO WINDOWS"))")
+                        Text("│ \(copy.text("Click an agent on the left"))")
+                        Text("│ \(copy.text("to open its real CLI here"))")
+                        Text("└─ \(copy.text("or use the LINK buttons above"))")
                     }
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(RelayPalette.muted)
                     .padding(18)
                 }
-
+            } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(taskGroups) { group in
-                            projectHeader(group)
-                            ForEach(group.tasks) { task in
-                                TaskRow(
-                                    task: task,
-                                    selected: relay.selectedTaskID == task.id
-                                ) {
-                                    if reduceMotion {
-                                        relay.selectTask(task.id)
-                                    } else {
-                                        withAnimation(.snappy(duration: 0.24)) {
-                                            relay.selectTask(task.id)
-                                        }
-                                    }
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(terminals.sessions) { session in
+                            RelayTerminalSidebarRow(
+                                session: session,
+                                focused: terminals.focusedID == session.id,
+                                needsReview: terminals.needsOutputReview(session.id),
+                                onClose: { terminals.close(session) },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(session.id) }
                                 }
-                            }
+                            )
+                        }
+                        ForEach(terminals.dialogues) { run in
+                            RelayDialogueSidebarRow(
+                                run: run,
+                                agents: relay.agents,
+                                focused: terminals.focusedID == run.id,
+                                onFocus: { terminals.activate(run.id) },
+                                onClose: { terminals.closeDialogue(run) },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(run.id) }
+                                }
+                            )
+                        }
+                        ForEach(terminals.compares) { run in
+                            CompareSidebarRow(
+                                run: run,
+                                agents: relay.agents,
+                                focused: terminals.focusedID == run.id,
+                                onFocus: { terminals.activate(run.id) },
+                                onClose: { terminals.closeCompare(run) },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(run.id) }
+                                }
+                            )
+                        }
+                        ForEach(terminals.chains) { run in
+                            ChainSidebarRow(
+                                run: run,
+                                agents: relay.agents,
+                                focused: terminals.focusedID == run.id,
+                                onFocus: { terminals.activate(run.id) },
+                                onClose: { terminals.closeChain(run) },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(run.id) }
+                                }
+                            )
+                        }
+                        if let panel = terminals.approvalPanel {
+                            RelayPanelSidebarRow(
+                                glyph: "◇",
+                                tint: RelayPalette.warning,
+                                title: copy.text("Approvals"),
+                                subtitle: pendingInteractionIDs.isEmpty
+                                    ? copy.text("No pending approvals.")
+                                    : copy.text("⟨N⟩ pending").replacingOccurrences(
+                                        of: "⟨N⟩",
+                                        with: "\(pendingInteractionIDs.count)"
+                                    ),
+                                focused: terminals.focusedID == panel.id,
+                                closeHelpKey: "Close approvals",
+                                onFocus: { terminals.activate(panel.id) },
+                                onClose: { terminals.closeApprovals() },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(panel.id) }
+                                }
+                            )
                         }
                     }
                     .padding(.horizontal, 10)
@@ -310,6 +730,210 @@ struct ContentView: View {
             .padding(18)
         }
         .background(RelayPalette.panel)
+    }
+
+    private func projectDock(compact: Bool, minimal: Bool) -> some View {
+        HStack(spacing: 0) {
+            ZStack(alignment: .bottom) {
+                Circle()
+                    .stroke(RelayPalette.signal.opacity(0.32), lineWidth: 5)
+                    .frame(width: 18, height: 18)
+                Circle()
+                    .fill(RelayPalette.signal)
+                    .frame(width: 6, height: 6)
+                Rectangle()
+                    .fill(RelayPalette.signal.opacity(0.38))
+                    .frame(width: 2, height: 15)
+                    .offset(y: 18)
+            }
+            .frame(width: 46, height: 38)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(projectName(relay.defaultWorkingDirectory))
+                    .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.text)
+                    .lineLimit(1)
+                Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !minimal {
+                    Text(copy.text("New windows use this project"))
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .tracking(0.45)
+                        .foregroundStyle(RelayPalette.signal.opacity(0.9))
+                }
+            }
+
+            Spacer(minLength: 6)
+
+            Button {
+                openProjectPair()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "rectangle.split.2x1")
+                    Text(copy.text("PAIR"))
+                }
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
+            .help(copy.text("Open Claude and Codex for this project"))
+            .accessibilityLabel(copy.text("Open Claude and Codex for this project"))
+
+            Menu {
+                Section(copy.text("RECENT PROJECTS")) {
+                    ForEach(relay.recentWorkingDirectories, id: \.self) { path in
+                        Button {
+                            activateProjectDirectory(path)
+                        } label: {
+                            if path == relay.defaultWorkingDirectory {
+                                Label(projectMenuLabel(path), systemImage: "checkmark")
+                            } else {
+                                Text(projectMenuLabel(path))
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button(copy.text("Choose project folder…")) {
+                    chooseDirectory()
+                }
+            } label: {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 24, height: 28)
+                    .foregroundStyle(RelayPalette.signal)
+                    .background(RelayPalette.signal.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help(copy.text("Switch project"))
+            .accessibilityLabel(copy.text("Switch project"))
+        }
+        .padding(.vertical, compact ? 5 : 9)
+        .padding(.trailing, 9)
+        .background(RelayPalette.signal.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(RelayPalette.signal.opacity(0.18), lineWidth: 1)
+        }
+    }
+
+    private func projectName(_ path: String) -> String {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? "/" : name
+    }
+
+    private func abbreviatedProjectPath(_ path: String) -> String {
+        (path as NSString).abbreviatingWithTildeInPath
+    }
+
+    private func projectMenuLabel(_ path: String) -> String {
+        "\(projectName(path))  ·  \(abbreviatedProjectPath(path))"
+    }
+
+    private func activateProjectDirectory(_ path: String) {
+        if reduceMotion {
+            relay.activateProjectDirectory(path)
+        } else {
+            withAnimation(RelayPalette.selectSpring) {
+                relay.activateProjectDirectory(path)
+            }
+        }
+    }
+
+    private func openProjectPair() {
+        let shouldTile = terminals.openProjectPair(
+            agents: relay.agents,
+            cwd: relay.defaultWorkingDirectory
+        ) { agent, key in
+            agent.options.first { $0.key == key }.map {
+                relay.agentOptionValue(agentID: agent.id, option: $0)
+            }
+        }
+        if shouldTile {
+            animateWorkspaceChange { terminals.arrangeAll() }
+        }
+    }
+
+    private func terminalAttentionHelp(_ attention: RelayTerminalAttention) -> String {
+        let key = switch attention.kind {
+        case .promptReview:
+            "Next action: review a staged prompt · ⟨N⟩ pending · ⌥⌘J"
+        case .pendingOutput:
+            "Next action: review unseen output · ⟨N⟩ pending · ⌥⌘J"
+        case .activeOutput:
+            "Focus latest terminal output · ⌥⌘J"
+        }
+        return copy.text(key)
+            .replacingOccurrences(of: "⟨N⟩", with: "\(attention.count)")
+    }
+
+    private var terminalAttentionRouter: some View {
+        TimelineView(.periodic(from: .now, by: 0.25)) { context in
+            if let attention = terminals.nextAttention(at: context.date) {
+                let icon = switch attention.kind {
+                case .promptReview: "checkmark.circle.fill"
+                case .pendingOutput: "eye.fill"
+                case .activeOutput: "waveform.path"
+                }
+                let tint = switch attention.kind {
+                case .promptReview: RelayPalette.mix
+                case .pendingOutput: RelayPalette.warning
+                case .activeOutput: RelayPalette.signal
+                }
+                Button {
+                    animateWorkspaceChange {
+                        terminals.focusNextAttention(at: context.date)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: icon)
+                        Text(attention.kind == .activeOutput
+                            ? "\(copy.text("OUTPUT")) \(attention.count)"
+                            : "\(copy.text("NEXT")) \(attention.count)")
+                    }
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: tint))
+                .keyboardShortcut("j", modifiers: [.command, .option])
+                .help(terminalAttentionHelp(attention))
+                .accessibilityLabel(terminalAttentionHelp(attention))
+                .accessibilityValue("\(attention.count)")
+            }
+        }
+        .frame(width: 62)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 1),
+            value: terminals.attentionPendingCount
+        )
+    }
+
+    @ViewBuilder
+    private var terminalAttentionReturn: some View {
+        if let session = terminals.attentionReturnSession {
+            Button {
+                animateWorkspaceChange {
+                    terminals.returnFromAttention()
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.uturn.backward")
+                    Text(copy.text("BACK"))
+                }
+                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: session.accent))
+            .keyboardShortcut("k", modifiers: [.command, .option])
+            .help(copy.text("Return to ⟨CLI⟩ · ⌥⌘K")
+                .replacingOccurrences(of: "⟨CLI⟩", with: session.agentName))
+            .accessibilityLabel(copy.text("Return to ⟨CLI⟩ · ⌥⌘K")
+                .replacingOccurrences(of: "⟨CLI⟩", with: session.agentName))
+            .transition(.move(edge: .leading).combined(with: .opacity))
+        }
     }
 
     private var agentModeBar: some View {
@@ -379,6 +1003,38 @@ struct ContentView: View {
                 .background(RelayPalette.ink.opacity(0.65))
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .accessibilityLabel(copy.text("Instruction passed between steps (optional)"))
+
+            HStack(spacing: 6) {
+                if !relay.chainTemplates.isEmpty {
+                    Menu("▾ \(copy.text("TEMPLATES"))") {
+                        ForEach(relay.chainTemplates) { template in
+                            Button("\(template.name)  ·  \(template.agents.map(\.localizedUppercase).joined(separator: " › "))") {
+                                relay.applyChainTemplate(template)
+                            }
+                        }
+                        Divider()
+                        Menu(copy.text("Delete template")) {
+                            ForEach(relay.chainTemplates) { template in
+                                Button(template.name, role: .destructive) {
+                                    relay.deleteChainTemplate(template)
+                                }
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                    .fixedSize()
+                }
+                Spacer()
+                if relay.chainSequence.count >= 2 {
+                    Button(copy.text("SAVE AS TEMPLATE")) {
+                        chainTemplateName = ""
+                        showingSaveTemplate = true
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.warning))
+                }
+            }
         }
         .padding(9)
         .background(RelayPalette.warning.opacity(0.06))
@@ -535,21 +1191,28 @@ struct ContentView: View {
     private var workspaceHeader: some View {
         VStack(spacing: 14) {
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(relay.selectedTask.map { "THREAD / \($0.shortID) / \($0.adapterID.uppercased())" }
-                         ?? "\(copy.text("NEW THREAD")) / \(relay.selectedAgent?.name.uppercased() ?? copy.text("unavailable"))")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(RelayPalette.muted)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(workspaceAccent)
+                            .frame(width: 5, height: 5)
+                        Text(relay.selectedTask.map { "THREAD ── \($0.shortID) ──▶ \($0.adapterID.uppercased())" }
+                             ?? "\(copy.text("NEW THREAD")) ──▶ \(relay.selectedAgent?.name.uppercased() ?? copy.text("unavailable"))")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .tracking(1.1)
+                            .foregroundStyle(RelayPalette.muted.opacity(0.85))
+                    }
                     if let task = relay.selectedTask, renamingTaskID == task.id {
                         TextField(copy.text("Thread title"), text: $renameDraft)
                             .textFieldStyle(.plain)
-                            .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 16, weight: .semibold, design: .monospaced))
                             .focused($renameFocused)
                             .onSubmit { commitRename() }
                             .onExitCommand(perform: cancelRename)
                     } else {
                         Text(relay.selectedTask?.displayTitle ?? copy.text("Local multi-CLI workspace"))
-                            .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                            .tracking(-0.1)
                             .lineLimit(1)
                     }
                 }
@@ -572,12 +1235,21 @@ struct ContentView: View {
                         Button(copy.text("RENAME")) { startRename(task) }
                             .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
                     }
+                    Button("⫿ \(copy.text("SPLIT"))") {
+                        relay.pinSelectedThreadAsPane()
+                    }
+                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                    .disabled(relay.paneTaskIDs.contains(task.id) || relay.paneTaskIDs.count >= 3)
+                    .help(copy.text("Pin this thread as a side pane"))
                     if !task.status.isTerminal {
                         Button(copy.text("CANCEL")) {
                             Task { await relay.cancelSelectedTask() }
                         }
                         .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
                     } else {
+                        Button(copy.text("EXPORT")) { exportThread(task) }
+                            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                            .help(copy.text("Export this thread as Markdown"))
                         Button(copy.text("DELETE")) {
                             pendingDeletionTask = task
                         }
@@ -937,6 +1609,22 @@ struct ContentView: View {
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                 Spacer()
                 StatusTag(status: member.status)
+                if !isChain, member.status == .completed {
+                    Menu("★ PICK") {
+                        ForEach(relay.agents.filter(\.isAvailable)) { agent in
+                            Button("→ \(agent.name)") {
+                                Task {
+                                    await relay.promoteCompareMember(member.id, to: agent.id)
+                                }
+                            }
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                    .fixedSize()
+                    .help(copy.text("Continue from this answer with another agent"))
+                }
                 Button(copy.text("FOCUS")) {
                     relay.selectTask(member.id)
                     focusedCompareMemberID = member.id
@@ -976,39 +1664,73 @@ struct ContentView: View {
                 .fill(RelayPalette.line)
                 .frame(height: 1)
 
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 11) {
                 Text("›")
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(RelayPalette.signal)
+                    .font(.system(size: 19, weight: .bold, design: .monospaced))
+                    .foregroundStyle(
+                        promptFocused ? workspaceAccent : RelayPalette.muted
+                    )
 
                 TextField(composerPlaceholder, text: $prompt, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, design: .monospaced))
-                    .lineLimit(1...4)
+                    .lineSpacing(3)
+                    .lineLimit(1...5)
                     .focused($promptFocused)
                     .onSubmit(submit)
                     .disabled(!relay.canSubmit)
 
                 Text(composerModeLabel)
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(composerModeColor)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .foregroundStyle(composerModeColor.opacity(0.9))
 
                 Button(action: submit) {
                     Image(systemName: relay.isSubmitting ? "ellipsis" : "arrow.up")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(width: 26, height: 26)
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(sendEnabled ? RelayPalette.ink : RelayPalette.muted)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle().fill(
+                                sendEnabled
+                                    ? workspaceAccent
+                                    : RelayPalette.raised
+                            )
+                        )
                 }
-                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
-                .disabled(
-                    prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || relay.isSubmitting
-                    || !relay.canSubmit
-                )
+                .buttonStyle(.plain)
+                .animation(RelayPalette.pressSpring, value: sendEnabled)
+                .disabled(!sendEnabled)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(RelayPalette.raised.opacity(promptFocused ? 1 : 0.75))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        promptFocused
+                            ? workspaceAccent.opacity(0.5)
+                            : RelayPalette.line,
+                        lineWidth: 1
+                    )
+            }
+            .animation(
+                reduceMotion ? nil : RelayPalette.selectSpring,
+                value: promptFocused
+            )
             .padding(.horizontal, 16)
-            .padding(.vertical, 13)
-            .background(RelayPalette.panel)
+            .padding(.vertical, 12)
+            .background(RelayPalette.panel.opacity(0.6))
         }
+    }
+
+    private var sendEnabled: Bool {
+        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !relay.isSubmitting
+            && relay.canSubmit
     }
 
     private var composerPlaceholder: String {
@@ -1070,11 +1792,28 @@ struct ContentView: View {
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .tracking(1.2)
-            .foregroundStyle(RelayPalette.muted)
+            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+            .tracking(1.7)
+            .foregroundStyle(RelayPalette.muted.opacity(0.85))
             .padding(.horizontal, 18)
             .padding(.vertical, 5)
+    }
+
+    private func exportThread(_ task: RelayTask) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "\(task.displayTitle.prefix(40)).md"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let markdown = RelayMarkdown.exportMarkdown(
+            task: task,
+            output: relay.output,
+            copy: copy
+        )
+        do {
+            try Data(markdown.utf8).write(to: url, options: .atomic)
+        } catch {
+            relay.errorMessage = error.localizedDescription
+        }
     }
 
     private func chooseDirectory() {
@@ -1082,9 +1821,9 @@ struct ContentView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: relay.workingDirectory)
+        panel.directoryURL = URL(fileURLWithPath: relay.defaultWorkingDirectory)
         if panel.runModal() == .OK, let url = panel.url {
-            relay.setWorkingDirectory(url.path)
+            activateProjectDirectory(url.path)
         }
     }
 
@@ -1144,74 +1883,168 @@ struct ContentView: View {
     }
 }
 
+/// First-class link-action button: glyph + label chip used in the sidebar.
+struct LinkActionButtonStyle: ButtonStyle {
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        StyledLabel(configuration: configuration, tint: tint)
+    }
+
+    private struct StyledLabel: View {
+        let configuration: Configuration
+        let tint: Color
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(configuration.isPressed ? RelayPalette.ink : tint)
+                .padding(.vertical, 8)
+                .background(
+                    configuration.isPressed
+                        ? tint
+                        : tint.opacity(hovering ? 0.18 : 0.08)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(tint.opacity(hovering ? 0.5 : 0.22), lineWidth: 1)
+                }
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(RelayPalette.pressSpring, value: configuration.isPressed)
+                .animation(.easeOut(duration: 0.12), value: hovering)
+                .onHover { hovering = $0 }
+        }
+    }
+}
+
 private struct AgentRow: View {
     @Environment(\.relayLanguage) private var language
     let agent: RelayAgent
     let activity: RelayAgentActivity
     let selected: Bool
-    var compare = false
-    var checked = false
-    var chain = false
-    var chainSteps: [Int] = []
+    var terminalCount = 0
+    var compact = false
+    var onStartDialogue: (() -> Void)?
+    @State private var hovering = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
-                if compare {
-                    Text(checked ? "▣" : "☐")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundStyle(checked ? RelayPalette.signal : RelayPalette.muted)
-                } else if chain {
-                    Text(chainSteps.isEmpty
-                         ? "+"
-                         : chainSteps.map(String.init).joined(separator: ","))
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(chainSteps.isEmpty ? RelayPalette.muted : RelayPalette.warning)
-                        .frame(minWidth: 16)
+                ZStack(alignment: .bottomTrailing) {
+                    if selected {
+                        Circle()
+                            .fill(agent.accent.opacity(0.4))
+                            .frame(width: 30, height: 30)
+                            .blur(radius: 12)
+                    }
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(agent.accent.opacity(0.15))
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(RelayPalette.ink.opacity(0.85))
+                        )
+                        .frame(width: 28, height: 28)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7)
+                                .stroke(agent.accent.opacity(0.45), lineWidth: 1)
+                        }
+                        .overlay {
+                            Text(agent.monogram)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .tracking(0.5)
+                                .foregroundStyle(agent.accent)
+                        }
+                    Circle()
+                        .fill(agent.health.color)
+                        .frame(width: 7, height: 7)
+                        .overlay {
+                            Circle().stroke(RelayPalette.ink, lineWidth: 1.5)
+                        }
+                        .offset(x: 2, y: 2)
                 }
-                StatusDot(color: agent.health.color, live: agent.health == .checking)
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(agent.name)
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     Text(agent.health.reason ?? agent.version ?? agent.detail)
-                        .font(.system(size: 9, design: .monospaced))
+                        .font(.system(size: 9.5, design: .monospaced))
                         .foregroundStyle(RelayPalette.muted)
                         .lineLimit(1)
                 }
                 Spacer()
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(RelayCopy(language: language).agentHealth(agent.health))
-                        .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundStyle(agent.health.color)
-                    if activity.hasWork {
-                        HStack(spacing: 4) {
-                            if activity.active > 0 {
-                                Text("\(activity.active) \(RelayCopy(language: language).text("ACTIVE"))")
-                                    .foregroundStyle(RelayPalette.signal)
-                            }
-                            if activity.active > 0, activity.waiting > 0 {
-                                Text("·")
-                                    .foregroundStyle(RelayPalette.muted)
-                            }
-                            if activity.waiting > 0 {
-                                Text("\(activity.waiting) \(RelayCopy(language: language).text("WAITING"))")
-                                    .foregroundStyle(RelayPalette.warning)
-                            }
+                if hovering, let onStartDialogue, agent.isAvailable {
+                    HStack(spacing: 4) {
+                        Button {
+                            onStartDialogue()
+                        } label: {
+                            Text("⇄")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .frame(width: 20, height: 20)
                         }
-                        .font(.system(size: 7, weight: .bold, design: .monospaced))
-                        .monospacedDigit()
+                        .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix))
+                        .help(RelayCopy(language: language).text("Start a dialogue with this agent"))
+                        Text("▣")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(agent.accent.opacity(0.8))
+                            .help(RelayCopy(language: language).text("Open its CLI terminal"))
+                    }
+                } else {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        HStack(spacing: 4) {
+                            if terminalCount > 0 {
+                                Text("▣\(terminalCount > 1 ? "×\(terminalCount)" : "")")
+                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                    .foregroundStyle(agent.accent.opacity(0.85))
+                            }
+                            Text(RelayCopy(language: language).agentHealth(agent.health))
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .foregroundStyle(agent.health.color)
+                        }
+                        if activity.hasWork {
+                            HStack(spacing: 4) {
+                                if activity.active > 0 {
+                                    Text("\(activity.active) \(RelayCopy(language: language).text("ACTIVE"))")
+                                        .foregroundStyle(RelayPalette.signal)
+                                }
+                                if activity.active > 0, activity.waiting > 0 {
+                                    Text("·")
+                                        .foregroundStyle(RelayPalette.muted)
+                                }
+                                if activity.waiting > 0 {
+                                    Text("\(activity.waiting) \(RelayCopy(language: language).text("WAITING"))")
+                                        .foregroundStyle(RelayPalette.warning)
+                                }
+                            }
+                            .font(.system(size: 7, weight: .bold, design: .monospaced))
+                            .monospacedDigit()
+                        }
                     }
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 9)
+            .padding(.vertical, compact ? 3 : 11)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? RelayPalette.signal.opacity(0.11) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .background(
+                selected
+                    ? agent.accent.opacity(0.13)
+                    : hovering ? RelayPalette.hover : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(alignment: .leading) {
+                if selected {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(agent.accent)
+                        .frame(width: 2)
+                        .padding(.vertical, 9)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(RelayPalette.selectSpring, value: selected)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
@@ -1238,6 +2071,7 @@ private struct TaskRow: View {
     let task: RelayTask
     let selected: Bool
     let action: () -> Void
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
@@ -1258,6 +2092,13 @@ private struct TaskRow: View {
                                 + "\(task.adapterID.uppercased()) · \(task.shortID)"
                         )
                         Spacer()
+                        Text(ThreadCatalog.elapsedLabel(
+                            createdAtMilliseconds: task.createdAtMilliseconds,
+                            updatedAtMilliseconds: task.updatedAtMilliseconds,
+                            isTerminal: task.status.isTerminal,
+                            nowMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000)
+                        ))
+                        .foregroundStyle(RelayPalette.muted.opacity(0.75))
                         Text(RelayCopy(language: language).taskStatus(task.status))
                     }
                     .font(.system(size: 8.5, design: .monospaced))
@@ -1267,41 +2108,82 @@ private struct TaskRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? RelayPalette.signal.opacity(0.11) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .background(
+                selected
+                    ? RelayPalette.signal.opacity(0.12)
+                    : hovering ? RelayPalette.hover : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(alignment: .leading) {
                 if selected {
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: 1)
                         .fill(RelayPalette.signal)
                         .frame(width: 2)
-                        .padding(.vertical, 7)
+                        .padding(.vertical, 8)
                 }
             }
-            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .animation(.easeOut(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 
 private struct OutputBlock: View {
     @Environment(\.relayLanguage) private var language
     let item: RelayTaskOutput
+    @State private var expanded = false
+
+    private var collapsible: Bool {
+        (item.kind == .tool || item.kind == .system)
+            && item.text.components(separatedBy: "\n").count > 6
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                Text(RelayCopy(language: language).outputKind(item.kind))
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(item.kind.color)
+                if collapsible {
+                    Button {
+                        expanded.toggle()
+                    } label: {
+                        Text("\(expanded ? "▾" : "▸") \(RelayCopy(language: language).outputKind(item.kind)) · \(item.text.components(separatedBy: "\n").count)L")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(item.kind.color)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(RelayCopy(language: language).outputKind(item.kind))
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(item.kind.color)
+                }
                 Rectangle()
                     .fill(item.kind.color.opacity(0.25))
                     .frame(height: 1)
+                if item.kind == .assistant {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(item.text, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(RelayPalette.muted)
+                    .help(RelayCopy(language: language).text("Copy this reply"))
+                }
             }
-            Text(item.text)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(RelayPalette.text)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            if collapsible, !expanded {
+                EmptyView()
+            } else if item.kind == .assistant {
+                MarkdownBody(text: item.text)
+            } else {
+                Text(item.text)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(RelayPalette.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.leading, 12)
         .overlay(alignment: .leading) {
@@ -1312,7 +2194,86 @@ private struct OutputBlock: View {
     }
 }
 
-private struct InteractionGate: View {
+private struct MarkdownBody: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(RelayMarkdown.blocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case let .paragraph(paragraph):
+                    Text(styled(paragraph))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                case let .code(language, code):
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: 8) {
+                            Text(language?.uppercased() ?? "CODE")
+                                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                                .foregroundStyle(RelayPalette.muted)
+                            Spacer()
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(code, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 9))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(RelayPalette.muted)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(RelayPalette.raised.opacity(0.7))
+                        Text(code)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(RelayPalette.panel)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(RelayPalette.line, lineWidth: 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func styled(_ paragraph: String) -> AttributedString {
+        var lines = AttributedString()
+        for (index, line) in paragraph.components(separatedBy: "\n").enumerated() {
+            if index > 0 {
+                lines += AttributedString("\n")
+            }
+            if line.hasPrefix("#") {
+                var heading = AttributedString(
+                    line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
+                )
+                heading.font = .system(size: 13, weight: .bold, design: .monospaced)
+                lines += heading
+                continue
+            }
+            if let inline = try? AttributedString(
+                markdown: line,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+            ) {
+                lines += inline
+            } else {
+                lines += AttributedString(line)
+            }
+        }
+        return lines
+    }
+}
+
+struct InteractionGate: View {
     @Environment(\.relayLanguage) private var language
     let interaction: RelayInteraction
     let isResponding: Bool
@@ -1580,23 +2541,51 @@ private struct ConsoleLine: View {
     }
 }
 
-private struct ConsoleButtonStyle: ButtonStyle {
+struct ConsoleButtonStyle: ButtonStyle {
     let tint: Color
+    var prominent = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .bold, design: .monospaced))
-            .foregroundStyle(configuration.isPressed ? RelayPalette.ink : tint)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6)
-            .background(configuration.isPressed ? tint : tint.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(tint.opacity(configuration.isPressed ? 0 : 0.35), lineWidth: 1)
-            }
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+        StyledLabel(configuration: configuration, tint: tint, prominent: prominent)
+    }
+
+    private struct StyledLabel: View {
+        let configuration: Configuration
+        let tint: Color
+        let prominent: Bool
+        @State private var hovering = false
+
+        private var fillOpacity: Double {
+            if configuration.isPressed { return 1 }
+            if prominent { return hovering ? 0.28 : 0.18 }
+            return hovering ? 0.16 : 0.07
+        }
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                .tracking(0.4)
+                .foregroundStyle(configuration.isPressed ? RelayPalette.ink : tint)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6.5)
+                .background(configuration.isPressed ? tint : tint.opacity(fillOpacity))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(
+                            tint.opacity(
+                                configuration.isPressed
+                                    ? 0
+                                    : prominent || hovering ? 0.55 : 0.3
+                            ),
+                            lineWidth: 1
+                        )
+                }
+                .scaleEffect(configuration.isPressed ? 0.97 : 1)
+                .animation(RelayPalette.pressSpring, value: configuration.isPressed)
+                .animation(.easeOut(duration: 0.12), value: hovering)
+                .onHover { hovering = $0 }
+        }
     }
 }
 
@@ -1605,6 +2594,122 @@ private struct LineCLIEditorContext: Identifiable {
     let configuration: LineCLIConfiguration
 
     var id: String { agent.id }
+}
+
+private struct SecondaryPane: View {
+    @EnvironmentObject private var relay: RelayService
+    @Environment(\.relayLanguage) private var language
+    let task: RelayTask
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    private var accent: Color {
+        relay.agents.first { $0.id == task.adapterID }?.accent ?? RelayPalette.signal
+    }
+
+    private var canContinue: Bool {
+        task.status.isTerminal && task.sessionID != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 5, height: 5)
+                Text(task.adapterID.uppercased())
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .tracking(1.1)
+                    .foregroundStyle(accent)
+                Text(task.displayTitle)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                Spacer()
+                StatusTag(status: task.status)
+                Button {
+                    relay.closePane(task.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Close this pane"))
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 44)
+            .padding(.bottom, 10)
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        ForEach(relay.groupOutputs[task.id] ?? []) { item in
+                            OutputBlock(item: item)
+                                .id(item.id)
+                        }
+                        if let interaction = task.pendingInteraction {
+                            InteractionGate(
+                                interaction: interaction,
+                                isResponding: relay.respondingInteractionID == interaction.id
+                            ) { action, answers in
+                                Task {
+                                    await relay.respondToInteraction(
+                                        taskID: task.id,
+                                        interaction: interaction,
+                                        action: action,
+                                        answers: answers
+                                    )
+                                }
+                            }
+                        }
+                        Color.clear.frame(height: 1).id("pane-bottom")
+                    }
+                    .padding(14)
+                }
+                .onChange(of: (relay.groupOutputs[task.id] ?? []).count) { _, _ in
+                    proxy.scrollTo("pane-bottom", anchor: .bottom)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+
+            HStack(spacing: 9) {
+                Text("›")
+                    .font(.system(size: 15, weight: .bold, design: .monospaced))
+                    .foregroundStyle(focused ? accent : RelayPalette.muted)
+                TextField(
+                    canContinue
+                        ? copy.text("Continue this thread…")
+                        : task.status.isTerminal
+                            ? copy.text("This thread has no resumable session.")
+                            : copy.text("The selected task is still running…"),
+                    text: $draft
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, design: .monospaced))
+                .focused($focused)
+                .disabled(!canContinue)
+                .onSubmit {
+                    let value = draft
+                    draft = ""
+                    Task { await relay.continueThread(taskID: task.id, prompt: value) }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(RelayPalette.panel.opacity(0.6))
+        }
+        .background(RelayPalette.ink.opacity(0.35))
+    }
 }
 
 private struct AdapterManagerView: View {

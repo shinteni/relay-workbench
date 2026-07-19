@@ -88,7 +88,32 @@ private struct AdapterManifestOption: Decodable {
     let key: String
     let label: String?
     let values: [String]
+    let valuesFrom: String?
     let `default`: String?
+
+    enum CodingKeys: String, CodingKey {
+        case key
+        case label
+        case values
+        case valuesFrom = "values_from"
+        case `default`
+    }
+
+    func resolvedValues(codexModels: [String], claudeModels: [String]) -> [String] {
+        let source: [String]
+        switch valuesFrom {
+        case "codex_models":
+            source = codexModels.filter { $0 != "auto" }
+        case "claude_models":
+            source = claudeModels
+        default:
+            return values
+        }
+        guard !source.isEmpty else { return values }
+        var resolved = ["default"]
+        resolved.append(contentsOf: source.filter { $0 != "default" })
+        return resolved
+    }
 }
 
 private struct AdapterGenericSpec: Decodable {
@@ -128,7 +153,9 @@ enum AdapterCatalog {
         bundledDirectory: URL?,
         userDirectory: URL,
         home: URL,
-        genericAdapter: URL? = nil
+        genericAdapter: URL? = nil,
+        codexModels: [String] = [],
+        claudeModels: [String] = []
     ) -> [RelayAgent] {
         var agents: [RelayAgent] = []
         var identifiers = Set<String>()
@@ -142,7 +169,13 @@ enum AdapterCatalog {
                 .filter { $0.pathExtension.lowercased() == "json" }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
             for url in urls {
-                var agent = loadManifest(at: url, home: home, genericAdapter: genericAdapter)
+                var agent = loadManifest(
+                    at: url,
+                    home: home,
+                    genericAdapter: genericAdapter,
+                    codexModels: codexModels,
+                    claudeModels: claudeModels
+                )
                 if identifiers.contains(agent.id), !agent.id.hasPrefix("invalid:") {
                     agent = invalidAgent(
                         at: url,
@@ -158,7 +191,7 @@ enum AdapterCatalog {
         return agents
     }
 
-    static func loadManifest(at url: URL, home: URL, genericAdapter: URL? = nil) -> RelayAgent {
+    static func loadManifest(at url: URL, home: URL, genericAdapter: URL? = nil, codexModels: [String] = [], claudeModels: [String] = []) -> RelayAgent {
         let manifest: AdapterManifest
         do {
             manifest = try JSONDecoder().decode(AdapterManifest.self, from: Data(contentsOf: url))
@@ -264,11 +297,16 @@ enum AdapterCatalog {
             versionExecutablePath: versionExecutablePath,
             versionArguments: versionArguments,
             options: (manifest.options ?? []).map { option in
-                RelayAgentOption(
+                let values = option.resolvedValues(
+                    codexModels: codexModels,
+                    claudeModels: claudeModels
+                )
+                return RelayAgentOption(
                     key: option.key,
                     label: option.label ?? option.key.uppercased(),
-                    values: option.values,
-                    defaultValue: option.default ?? option.values.first ?? ""
+                    values: values,
+                    defaultValue: option.default.flatMap { values.contains($0) ? $0 : nil }
+                        ?? values.first ?? ""
                 )
             },
             version: manifest.versionLabel,

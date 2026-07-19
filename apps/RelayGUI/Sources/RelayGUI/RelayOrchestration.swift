@@ -1,0 +1,904 @@
+import SwiftUI
+
+/// Send one prompt to several agents at once and watch the answers side by
+/// side (the old COMPARE mode as a floating window).
+@MainActor
+final class RelayCompareRun: ObservableObject, Identifiable {
+    struct Member: Identifiable {
+        let id: String
+        let agentID: String
+        let agentName: String
+    }
+
+    enum Phase: Equatable {
+        case setup, running, completed, stopped, failed(String)
+    }
+
+    let id = UUID()
+    @Published var selection: [String]
+    @Published var prompt = ""
+    @Published private(set) var members: [Member] = []
+    @Published private(set) var statuses: [String: RelayTaskStatus] = [:]
+    @Published private(set) var outputs: [String: [RelayTaskOutput]] = [:]
+    /// Members currently waiting in USER GATE (answered in the approvals window).
+    @Published private(set) var approvalWaiting: Set<String> = []
+    @Published private(set) var phase: Phase = .setup
+
+    private weak var relay: RelayService?
+    private var engine: Task<Void, Never>?
+
+    init(relay: RelayService?, preselected: [String]) {
+        self.relay = relay
+        self.selection = preselected
+    }
+
+    var isRunning: Bool { phase == .running }
+
+    func toggle(_ agentID: String) {
+        guard case .setup = phase else { return }
+        if let index = selection.firstIndex(of: agentID) {
+            selection.remove(at: index)
+        } else if selection.count < 4 {
+            selection.append(agentID)
+        }
+    }
+
+    func start() {
+        guard case .setup = phase, let relay else { return }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen = selection.compactMap { id in
+            relay.agents.first { $0.id == id && $0.isAvailable }
+        }
+        guard !trimmed.isEmpty, chosen.count >= 2 else { return }
+        phase = .running
+        engine = Task { [weak self] in
+            await self?.run(chosen: chosen, prompt: trimmed)
+        }
+    }
+
+    func stop() {
+        engine?.cancel()
+        engine = nil
+        if case .running = phase {
+            let ids = members.map(\.id)
+            let relay = relay
+            Task {
+                for id in ids {
+                    await relay?.cancelBackgroundTask(id)
+                }
+            }
+            phase = .stopped
+        }
+    }
+
+    /// Called when the window closes: stop and release cached outputs.
+    func close() {
+        stop()
+        relay?.unpinOutputs(members.map(\.id))
+    }
+
+    func statusLabel(copy: RelayCopy) -> String {
+        switch phase {
+        case .setup:
+            copy.text("Pick agents and a prompt")
+        case .running:
+            copy.text("Running in parallel…")
+        case .completed:
+            copy.text("All members finished")
+        case .stopped:
+            copy.text("Stopped")
+        case .failed(let message):
+            "\(copy.text("Failed:")) \(message)"
+        }
+    }
+
+    private func run(chosen: [RelayAgent], prompt: String) async {
+        guard let relay else { return }
+        let group = UUID().uuidString.lowercased()
+        var created: [Member] = []
+        var startFailure: String?
+        for agent in chosen {
+            do {
+                let taskID = try await relay.startGroupTask(
+                    agentID: agent.id, prompt: prompt, group: group
+                )
+                created.append(Member(
+                    id: taskID, agentID: agent.id, agentName: agent.name
+                ))
+                members = created
+            } catch {
+                startFailure = error.localizedDescription
+                break
+            }
+        }
+        guard !created.isEmpty else {
+            phase = .failed(startFailure ?? "start failed")
+            return
+        }
+        relay.pinOutputs(created.map(\.id))
+        await watch(relay: relay)
+        guard !Task.isCancelled else { return }
+        if let startFailure {
+            phase = .failed(startFailure)
+        } else if case .running = phase {
+            phase = .completed
+        }
+    }
+
+    private func watch(relay: RelayService) async {
+        while !Task.isCancelled {
+            var allTerminal = true
+            for member in members {
+                guard let snapshot = relay.taskSnapshot(member.id) else {
+                    allTerminal = false
+                    continue
+                }
+                statuses[member.id] = snapshot.status
+                if snapshot.pendingInteraction != nil {
+                    approvalWaiting.insert(member.id)
+                } else {
+                    approvalWaiting.remove(member.id)
+                }
+                await relay.refreshMemberOutput(taskID: member.id)
+                outputs[member.id] = relay.groupOutputs[member.id] ?? []
+                if !snapshot.status.isTerminal {
+                    allTerminal = false
+                }
+            }
+            if allTerminal, !members.isEmpty {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+    }
+}
+
+/// A daemon-scheduled chain (the old CHAIN mode as a floating window): the
+/// prompt runs through the steps in order, each step receiving the previous
+/// answer; progression survives GUI restarts.
+@MainActor
+final class RelayChainRun: ObservableObject, Identifiable {
+    struct Step: Identifiable {
+        let id: String
+        let index: Int
+        let agentID: String
+        var status: RelayTaskStatus
+    }
+
+    enum Phase: Equatable {
+        case setup, running, completed, stopped, failed(String)
+    }
+
+    let id = UUID()
+    @Published var sequence: [String]
+    @Published var prompt = ""
+    @Published var note = ""
+    @Published private(set) var steps: [Step] = []
+    @Published private(set) var outputs: [String: [RelayTaskOutput]] = [:]
+    /// Steps currently waiting in USER GATE (answered in the approvals window).
+    @Published private(set) var approvalWaiting: Set<String> = []
+    @Published private(set) var phase: Phase = .setup
+
+    private weak var relay: RelayService?
+    private var engine: Task<Void, Never>?
+    private var chainID: String?
+    private var pinned: Set<String> = []
+
+    init(relay: RelayService?, preselected: [String]) {
+        self.relay = relay
+        self.sequence = preselected
+    }
+
+    var isRunning: Bool { phase == .running }
+
+    func append(_ agentID: String) {
+        guard case .setup = phase, sequence.count < 4 else { return }
+        sequence.append(agentID)
+    }
+
+    func removeLastStep() {
+        guard case .setup = phase else { return }
+        _ = sequence.popLast()
+    }
+
+    func clearSteps() {
+        guard case .setup = phase else { return }
+        sequence.removeAll()
+    }
+
+    func start() {
+        guard case .setup = phase, let relay else { return }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, sequence.count >= 2 else { return }
+        phase = .running
+        let sequence = sequence
+        let note = note
+        engine = Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.chainID = try await relay.startChainRun(
+                    sequence: sequence, prompt: trimmed, note: note
+                )
+            } catch {
+                self.phase = .failed(error.localizedDescription)
+                return
+            }
+            await self.watch(relay: relay)
+        }
+    }
+
+    func stop() {
+        engine?.cancel()
+        engine = nil
+        if case .running = phase {
+            let ids = steps.filter { !$0.status.isTerminal }.map(\.id)
+            let relay = relay
+            Task {
+                for id in ids {
+                    await relay?.cancelBackgroundTask(id)
+                }
+            }
+            phase = .stopped
+        }
+    }
+
+    func close() {
+        stop()
+        relay?.unpinOutputs(Array(pinned))
+    }
+
+    func statusLabel(copy: RelayCopy) -> String {
+        switch phase {
+        case .setup:
+            copy.text("Order the steps and enter a prompt")
+        case .running:
+            copy.text("Relaying step by step…")
+        case .completed:
+            copy.text("Chain completed")
+        case .stopped:
+            copy.text("Stopped")
+        case .failed(let message):
+            "\(copy.text("Failed:")) \(message)"
+        }
+    }
+
+    private func watch(relay: RelayService) async {
+        let copy = RelayCopy(language: relay.language)
+        while !Task.isCancelled {
+            guard let chainID else { return }
+            let members = relay.tasks
+                .filter { $0.compareGroup == chainID }
+                .sorted { ($0.chainStep ?? 0) < ($1.chainStep ?? 0) }
+            let fresh = members.map(\.id).filter { !pinned.contains($0) }
+            if !fresh.isEmpty {
+                pinned.formUnion(fresh)
+                relay.pinOutputs(fresh)
+            }
+            steps = members.map { member in
+                Step(
+                    id: member.id,
+                    index: (member.chainStep ?? 0) + 1,
+                    agentID: member.adapterID,
+                    status: member.status
+                )
+            }
+            for member in members {
+                if member.pendingInteraction != nil {
+                    approvalWaiting.insert(member.id)
+                } else {
+                    approvalWaiting.remove(member.id)
+                }
+                await relay.refreshMemberOutput(taskID: member.id)
+                outputs[member.id] = relay.groupOutputs[member.id] ?? []
+            }
+            if members.count == sequence.count,
+               members.allSatisfy({ $0.status.isTerminal }) {
+                if members.allSatisfy({ $0.status == .completed }) {
+                    phase = .completed
+                } else {
+                    let detail = members.first { $0.status != .completed }?
+                        .latestMessage ?? ""
+                    phase = .failed(
+                        detail.isEmpty ? copy.text("The turn failed.") : detail
+                    )
+                }
+                return
+            }
+            if let halted = members.first(where: {
+                $0.status == .failed || $0.status == .canceled
+            }) {
+                phase = .failed(
+                    halted.latestMessage ?? copy.text("The turn failed.")
+                )
+                return
+            }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+    }
+}
+
+/// Shared plain-text rendering of task output items for orchestration windows.
+private struct RelayOutputLines: View {
+    let items: [RelayTaskOutput]
+    let emptyHint: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            let visible = items.filter { $0.kind != .user }
+            if visible.isEmpty {
+                Text(emptyHint)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+            }
+            ForEach(visible) { item in
+                if item.kind == .assistant {
+                    Text(item.text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineSpacing(2.5)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text("· \(item.text)")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(
+                            item.kind == .error ? RelayPalette.danger : RelayPalette.muted
+                        )
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+}
+
+struct RelayCompareWindow: View {
+    @ObservedObject var store: RelayTerminalStore
+    @ObservedObject var run: RelayCompareRun
+    let agents: [RelayAgent]
+    let frame: CGRect
+    let canvasSize: CGSize
+    let focused: Bool
+    @Environment(\.relayLanguage) private var language
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    private func agent(_ id: String) -> RelayAgent? {
+        agents.first { $0.id == id }
+    }
+
+    private var headerTitle: String {
+        if case .setup = run.phase {
+            return copy.text("COMPARE")
+        }
+        return run.members.map(\.agentName).joined(separator: " · ")
+    }
+
+    var body: some View {
+        RelayFloatingWindow(
+            store: store,
+            windowID: run.id,
+            frame: frame,
+            canvasSize: canvasSize,
+            focused: focused,
+            accent: RelayPalette.signal,
+            closeHelpKey: "Close this pane",
+            onClose: { store.closeCompare(run) }
+        ) {
+            Text("⋈")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.signal)
+            Text(headerTitle)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(RelayPalette.text)
+                .lineLimit(1)
+        } controls: {
+            if run.isRunning {
+                Button(copy.text("STOP")) {
+                    run.stop()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
+            }
+        } content: {
+            if case .setup = run.phase {
+                setupForm
+            } else {
+                columns
+            }
+        }
+    }
+
+    private var setupForm: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text(copy.text("SEND TO SEVERAL AGENTS AT ONCE"))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(1.5)
+                .foregroundStyle(RelayPalette.signal)
+
+            ForEach(agents.filter(\.isAvailable)) { agent in
+                Button {
+                    run.toggle(agent.id)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text(run.selection.contains(agent.id) ? "▣" : "☐")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundStyle(
+                                run.selection.contains(agent.id)
+                                    ? RelayPalette.signal : RelayPalette.muted
+                            )
+                        Circle()
+                            .fill(agent.accent)
+                            .frame(width: 5, height: 5)
+                        Text(agent.name)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.text)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            TextField(copy.text("Prompt sent to every selected agent"), text: $run.prompt, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(2...5)
+                .padding(9)
+                .background(RelayPalette.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(RelayPalette.line, lineWidth: 1)
+                }
+
+            HStack {
+                Text(copy.text("Pick 2–4 agents"))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                Spacer()
+                Button(copy.text("START")) {
+                    run.start()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.success))
+                .disabled(
+                    run.selection.count < 2
+                        || run.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var columns: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 1) {
+                ForEach(run.members) { member in
+                    memberColumn(member)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+            Text(run.statusLabel(copy: copy))
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+        }
+    }
+
+    private var statusColor: SwiftUI.Color {
+        switch run.phase {
+        case .completed: RelayPalette.success
+        case .failed: RelayPalette.danger
+        default: RelayPalette.muted
+        }
+    }
+
+    private func memberColumn(_ member: RelayCompareRun.Member) -> some View {
+        let accent = agent(member.agentID)?.accent ?? RelayPalette.signal
+        let status = run.statuses[member.id]
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 5, height: 5)
+                Text(member.agentName.uppercased())
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .tracking(1)
+                    .foregroundStyle(accent)
+                Spacer()
+                if let status {
+                    Text(copy.taskStatus(status))
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(
+                            status == .completed
+                                ? RelayPalette.success
+                                : status.isTerminal ? RelayPalette.danger : RelayPalette.signal
+                        )
+                }
+            }
+            if run.approvalWaiting.contains(member.id) {
+                Text(copy.text("Waiting for approval — respond in the approvals window."))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+            }
+            ScrollView {
+                RelayOutputLines(
+                    items: run.outputs[member.id] ?? [],
+                    emptyHint: copy.text("Waiting for adapter output…")
+                )
+                .padding(.bottom, 6)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RelayPalette.panel.opacity(0.35))
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(width: 1)
+        }
+    }
+}
+
+struct RelayChainWindow: View {
+    @ObservedObject var store: RelayTerminalStore
+    @ObservedObject var run: RelayChainRun
+    let agents: [RelayAgent]
+    let frame: CGRect
+    let canvasSize: CGSize
+    let focused: Bool
+    @Environment(\.relayLanguage) private var language
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    private func agentName(_ id: String) -> String {
+        agents.first { $0.id == id }?.name ?? id
+    }
+
+    private func agentAccent(_ id: String) -> SwiftUI.Color {
+        agents.first { $0.id == id }?.accent ?? RelayPalette.warning
+    }
+
+    private var headerTitle: String {
+        if case .setup = run.phase {
+            return copy.text("CHAIN")
+        }
+        return run.sequence.map { agentName($0) }.joined(separator: " › ")
+    }
+
+    var body: some View {
+        RelayFloatingWindow(
+            store: store,
+            windowID: run.id,
+            frame: frame,
+            canvasSize: canvasSize,
+            focused: focused,
+            accent: RelayPalette.warning,
+            closeHelpKey: "Close this pane",
+            onClose: { store.closeChain(run) }
+        ) {
+            Text("›")
+                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.warning)
+            Text(headerTitle)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(RelayPalette.text)
+                .lineLimit(1)
+        } controls: {
+            if run.isRunning {
+                Button(copy.text("STOP")) {
+                    run.stop()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
+            }
+        } content: {
+            if case .setup = run.phase {
+                setupForm
+            } else {
+                timeline
+            }
+        }
+    }
+
+    private var setupForm: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Text(copy.text("RELAY THE ANSWER THROUGH STEPS"))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .tracking(1.5)
+                .foregroundStyle(RelayPalette.warning)
+
+            HStack(spacing: 6) {
+                if run.sequence.isEmpty {
+                    Text(copy.text("Add steps in execution order"))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            ForEach(Array(run.sequence.enumerated()), id: \.offset) { index, id in
+                                if index > 0 {
+                                    Text("›")
+                                        .foregroundStyle(RelayPalette.warning)
+                                }
+                                Text("\(index + 1) \(agentName(id).uppercased())")
+                                    .fixedSize()
+                            }
+                        }
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                Menu("+ \(copy.text("STEP"))") {
+                    ForEach(agents.filter(\.isAvailable)) { agent in
+                        Button(agent.name) {
+                            run.append(agent.id)
+                        }
+                    }
+                }
+                .menuStyle(.borderlessButton)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(RelayPalette.warning)
+                .fixedSize()
+                .disabled(run.sequence.count >= 4)
+                Button(copy.text("UNDO")) {
+                    run.removeLastStep()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .disabled(run.sequence.isEmpty)
+                Button(copy.text("CLEAR")) {
+                    run.clearSteps()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.danger))
+                .disabled(run.sequence.isEmpty)
+                Spacer()
+            }
+
+            TextField(copy.text("Prompt for the first step"), text: $run.prompt, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(2...5)
+                .padding(9)
+                .background(RelayPalette.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(RelayPalette.line, lineWidth: 1)
+                }
+
+            TextField(copy.text("Instruction passed between steps (optional)"), text: $run.note)
+                .textFieldStyle(.plain)
+                .font(.system(size: 10, design: .monospaced))
+                .padding(8)
+                .background(RelayPalette.raised.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            HStack {
+                Text(copy.text("2–4 steps; runs in the daemon, survives closing the GUI"))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                Spacer()
+                Button(copy.text("START")) {
+                    run.start()
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.success))
+                .disabled(
+                    run.sequence.count < 2
+                        || run.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var timeline: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 13) {
+                    ForEach(run.steps) { step in
+                        stepSection(step)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
+            Text(run.statusLabel(copy: copy))
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+        }
+    }
+
+    private var statusColor: SwiftUI.Color {
+        switch run.phase {
+        case .completed: RelayPalette.success
+        case .failed: RelayPalette.danger
+        default: RelayPalette.muted
+        }
+    }
+
+    private func stepSection(_ step: RelayChainRun.Step) -> some View {
+        let accent = agentAccent(step.agentID)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Text("\(step.index)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+                Circle()
+                    .fill(accent)
+                    .frame(width: 5, height: 5)
+                Text(agentName(step.agentID).uppercased())
+                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                    .tracking(1)
+                    .foregroundStyle(accent)
+                Spacer()
+                Text(copy.taskStatus(step.status))
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(
+                        step.status == .completed
+                            ? RelayPalette.success
+                            : step.status.isTerminal ? RelayPalette.danger : RelayPalette.signal
+                    )
+            }
+            if run.approvalWaiting.contains(step.id) {
+                Text(copy.text("Waiting for approval — respond in the approvals window."))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(RelayPalette.warning)
+            }
+            RelayOutputLines(
+                items: run.outputs[step.id] ?? [],
+                emptyHint: copy.text("Waiting for adapter output…")
+            )
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(accent.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+    }
+}
+
+struct CompareSidebarRow: View {
+    @ObservedObject var run: RelayCompareRun
+    let agents: [RelayAgent]
+    var focused = false
+    let onFocus: () -> Void
+    let onClose: () -> Void
+    var onZoom: (() -> Void)?
+    @Environment(\.relayLanguage) private var language
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    var body: some View {
+        RelayPanelSidebarRow(
+            glyph: "⋈",
+            tint: RelayPalette.signal,
+            title: run.members.isEmpty
+                ? copy.text("COMPARE")
+                : run.members.map(\.agentName).joined(separator: " · "),
+            subtitle: run.statusLabel(copy: copy),
+            focused: focused,
+            closeHelpKey: "Close this pane",
+            onFocus: onFocus,
+            onClose: onClose,
+            onZoom: onZoom
+        )
+    }
+}
+
+struct ChainSidebarRow: View {
+    @ObservedObject var run: RelayChainRun
+    let agents: [RelayAgent]
+    var focused = false
+    let onFocus: () -> Void
+    let onClose: () -> Void
+    var onZoom: (() -> Void)?
+    @Environment(\.relayLanguage) private var language
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    var body: some View {
+        RelayPanelSidebarRow(
+            glyph: "›",
+            tint: RelayPalette.warning,
+            title: run.sequence.isEmpty
+                ? copy.text("CHAIN")
+                : run.sequence
+                    .map { id in agents.first { $0.id == id }?.name ?? id }
+                    .joined(separator: " › "),
+            subtitle: run.statusLabel(copy: copy),
+            focused: focused,
+            closeHelpKey: "Close this pane",
+            onFocus: onFocus,
+            onClose: onClose,
+            onZoom: onZoom
+        )
+    }
+}
+
+/// Sidebar row shared by workspace windows: click focuses/raises,
+/// double-click maximizes, the close control appears on hover, and the
+/// focused window is tinted with its accent.
+struct RelayPanelSidebarRow: View {
+    let glyph: String
+    let tint: SwiftUI.Color
+    let title: String
+    let subtitle: String
+    var focused = false
+    let closeHelpKey: String
+    let onFocus: () -> Void
+    let onClose: () -> Void
+    var onZoom: (() -> Void)?
+    @Environment(\.relayLanguage) private var language
+    @State private var hovering = false
+
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
+    var body: some View {
+        Button(action: onFocus) {
+            HStack(spacing: 8) {
+                Text(glyph)
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    onClose()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .frame(width: 14, height: 14)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text(closeHelpKey))
+                .opacity(hovering ? 1 : 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                focused
+                    ? tint.opacity(0.10)
+                    : hovering ? RelayPalette.hover : SwiftUI.Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(alignment: .leading) {
+                if focused {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(tint)
+                        .frame(width: 2)
+                        .padding(.vertical, 6)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded { onZoom?() }
+        )
+        .onHover { hovering = $0 }
+    }
+}

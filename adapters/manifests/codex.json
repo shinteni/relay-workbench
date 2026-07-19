@@ -5,6 +5,21 @@
   "detail": "OpenAI Codex CLI",
   "adapter_executable": "../bin/codex-adapter",
   "capabilities": ["session_resume", "codex_modes", "interactive_input"],
+  "options": [
+    {
+      "key": "codex_model",
+      "label": "MODEL",
+      "values": ["default"],
+      "values_from": "codex_models",
+      "default": "default"
+    },
+    {
+      "key": "codex_reasoning_effort",
+      "label": "EFFORT",
+      "values": ["default", "low", "medium", "high", "xhigh", "max", "ultra"],
+      "default": "default"
+    }
+  ],
   "requirements": [
     {
       "name": "Codex CLI",

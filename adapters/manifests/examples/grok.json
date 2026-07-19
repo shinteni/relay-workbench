@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "grok",
+  "name": "Grok",
+  "detail": "xAI Grok Build CLI",
+  "capabilities": [],
+  "generic": {
+    "command": "RELAY_GROK_PATH",
+    "arguments": [
+      "--prompt-file",
+      "/dev/stdin",
+      "--permission-mode",
+      "dontAsk",
+      "--cwd",
+      "{cwd}"
+    ],
+    "new_session_arguments": ["--session-id", "{session}"],
+    "resume_arguments": ["--resume", "{session}"]
+  },
+  "requirements": [
+    {
+      "name": "Grok CLI",
+      "environment": "RELAY_GROK_PATH",
+      "candidates": [
+        "~/.grok/bin/grok",
+        "/usr/local/bin/grok",
+        "/opt/homebrew/bin/grok"
+      ],
+      "version_arguments": ["--version"]
+    }
+  ]
+}

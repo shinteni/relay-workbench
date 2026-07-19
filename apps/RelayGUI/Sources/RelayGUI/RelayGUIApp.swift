@@ -1,19 +1,60 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
 final class RelayApplicationDelegate: NSObject, NSApplicationDelegate {
     let relay = RelayService()
+    private let notifier = RelayNotifier()
+    private let hotkey = RelayHotkey()
+    private let quickBar = RelayQuickBarController()
+    private var quickBarObservation: AnyCancellable?
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        synchronizeQuickBarHotkey(enabled: relay.quickBarEnabled)
+        quickBarObservation = relay.$quickBarEnabled
+            .removeDuplicates()
+            .sink { [weak self] enabled in
+                self?.synchronizeQuickBarHotkey(enabled: enabled)
+            }
+        notifier.activate()
+        notifier.isUserWatching = { [weak self] in
+            NSApplication.shared.isActive && self?.mainWindow?.isVisible == true
+        }
+        notifier.onSelectTask = { [weak self] taskID in
+            guard let self else { return }
+            showMainWindow()
+            relay.selectTask(taskID)
+        }
+        relay.onTaskEvents = { [weak self] events in
+            guard let self else { return }
+            notifier.post(
+                events,
+                enabled: relay.notificationsEnabled,
+                copy: RelayCopy(language: relay.language)
+            )
+        }
         relay.startMonitoring()
         showMainWindow()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        hotkey.unregister()
         relay.stopMonitoring()
+    }
+
+    private func synchronizeQuickBarHotkey(enabled: Bool) {
+        if enabled {
+            hotkey.register { [weak self] in
+                guard let self else { return }
+                quickBar.toggle(relay: relay)
+            }
+        } else {
+            quickBar.close()
+            hotkey.unregister()
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -41,9 +82,14 @@ final class RelayApplicationDelegate: NSObject, NSApplicationDelegate {
             ]
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
+            // Background dragging would swallow mouseDown before the floating
+            // terminal windows' drag gestures see it; the titlebar strip still
+            // moves the app window.
+            window.isMovableByWindowBackground = false
             window.isReleasedWhenClosed = false
             window.tabbingMode = .disallowed
+            window.isOpaque = false
+            window.backgroundColor = .clear
             window.minSize = NSSize(width: 960, height: 620)
             window.setContentSize(NSSize(width: 1180, height: 760))
             window.center()

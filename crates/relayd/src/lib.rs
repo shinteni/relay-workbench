@@ -1406,6 +1406,12 @@ async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
         if !process_group_exists(process_group)? {
             return Ok(());
         }
+        // 最初の SIGKILL と fork が競合して遅れて現れた子プロセスも同じ専用グループで止める。
+        match signal_process_group(process_group) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+            Err(error) => return Err(error).context("failed to kill adapter process group"),
+        }
         if tokio::time::Instant::now() >= deadline {
             bail!("adapter process group {process_group} did not exit after termination request");
         }
@@ -1416,6 +1422,9 @@ async fn wait_for_process_group_exit(process_group: i32) -> Result<()> {
 fn process_group_exists(process_group: i32) -> std::io::Result<bool> {
     let result = unsafe { libc::kill(-process_group, 0) };
     if result == 0 {
+        #[cfg(target_os = "macos")]
+        return macos_process_group_has_live_members(process_group);
+        #[cfg(not(target_os = "macos"))]
         return Ok(true);
     }
     let error = std::io::Error::last_os_error();
@@ -1424,6 +1433,101 @@ fn process_group_exists(process_group: i32) -> std::io::Result<bool> {
         Some(libc::EPERM) => Ok(true),
         _ => Err(error),
     }
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct MacOSProcBsdShortInfo {
+    pid: u32,
+    parent_pid: u32,
+    process_group: u32,
+    status: u32,
+    command: [libc::c_char; 16],
+    flags: u32,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    real_uid: libc::uid_t,
+    real_gid: libc::gid_t,
+    saved_uid: libc::uid_t,
+    saved_gid: libc::gid_t,
+    reserved: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+unsafe extern "C" {
+    fn proc_listpids(
+        process_type: u32,
+        type_info: u32,
+        buffer: *mut libc::c_void,
+        buffer_size: libc::c_int,
+    ) -> libc::c_int;
+    fn proc_pidinfo(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        argument: u64,
+        buffer: *mut libc::c_void,
+        buffer_size: libc::c_int,
+    ) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_group_has_live_members(process_group: i32) -> std::io::Result<bool> {
+    const PROC_PGRP_ONLY: u32 = 2;
+    const PROC_PIDT_SHORTBSDINFO: libc::c_int = 13;
+    let required = unsafe {
+        proc_listpids(
+            PROC_PGRP_ONLY,
+            process_group as u32,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if required <= 0 {
+        return Ok(false);
+    }
+    let mut pids = vec![0_i32; required as usize / std::mem::size_of::<i32>() + 16];
+    let bytes = unsafe {
+        proc_listpids(
+            PROC_PGRP_ONLY,
+            process_group as u32,
+            pids.as_mut_ptr().cast(),
+            (pids.len() * std::mem::size_of::<i32>()) as libc::c_int,
+        )
+    };
+    if bytes < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    pids.truncate(bytes as usize / std::mem::size_of::<i32>());
+
+    for pid in pids.into_iter().filter(|pid| *pid > 0) {
+        let mut info = std::mem::MaybeUninit::<MacOSProcBsdShortInfo>::uninit();
+        let expected = std::mem::size_of::<MacOSProcBsdShortInfo>() as libc::c_int;
+        let received = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDT_SHORTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                expected,
+            )
+        };
+        if received == 0 {
+            continue;
+        }
+        if received != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "proc_pidinfo returned an unexpected record size",
+            ));
+        }
+        let info = unsafe { info.assume_init() };
+        // SIGKILL 済みのゾンビは実行できず、親プロセスからも回収できないため待機対象にしない。
+        if info.status != libc::SZOMB {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn wait_for_stderr(stderr_task: Option<JoinHandle<()>>) -> Result<()> {
@@ -3843,9 +3947,13 @@ printf '{\"task_id\":\"%s\",\"status\":\"completed\",\"message\":\"done\",\"outp
         .await
         .unwrap();
 
+        let entries = tasks.read().await;
+        let snapshot = &entries.get(&task.id).unwrap().snapshot;
         assert_eq!(
-            tasks.read().await.get(&task.id).unwrap().snapshot.status,
-            TaskStatus::Canceled
+            snapshot.status,
+            TaskStatus::Canceled,
+            "unexpected shutdown result: {:?}",
+            snapshot.latest_message
         );
     }
 

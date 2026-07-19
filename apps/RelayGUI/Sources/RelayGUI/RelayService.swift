@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 enum RelayTaskStatus: String, Codable {
@@ -230,6 +231,49 @@ enum DaemonLaunchConfiguration {
     }
 }
 
+struct RelayProjectHistory {
+    static let defaultsKey = "recentWorkingDirectories"
+    static let limit = 6
+
+    static func load(
+        currentDirectory: String,
+        defaults: UserDefaults = .standard,
+        fileManager: FileManager = .default
+    ) -> [String] {
+        let saved = defaults.stringArray(forKey: defaultsKey) ?? []
+        var result: [String] = []
+        for path in [currentDirectory] + saved {
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            var isDirectory = ObjCBool(false)
+            guard fileManager.fileExists(atPath: normalized, isDirectory: &isDirectory),
+                  isDirectory.boolValue,
+                  !result.contains(normalized) else {
+                continue
+            }
+            result.append(normalized)
+            if result.count == limit {
+                break
+            }
+        }
+        return result
+    }
+
+    static func recording(_ path: String, in existing: [String]) -> [String] {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        var result = [normalized]
+        for candidate in existing {
+            let value = URL(fileURLWithPath: candidate).standardizedFileURL.path
+            if !result.contains(value) {
+                result.append(value)
+            }
+            if result.count == limit {
+                break
+            }
+        }
+        return result
+    }
+}
+
 private enum RelayClientError: LocalizedError {
     case missingResource(String)
     case commandFailed(String)
@@ -281,6 +325,7 @@ final class RelayService: ObservableObject {
     @Published var selectedAgentID = "codex"
     @Published var workingDirectory: String
     @Published private(set) var defaultWorkingDirectory: String
+    @Published private(set) var recentWorkingDirectories: [String]
     @Published var mixModel: String
     @Published var mixEffort: String
     @Published var codexMode: RelayCodexMode
@@ -293,6 +338,16 @@ final class RelayService: ObservableObject {
     @Published private(set) var chainMode = false
     @Published private(set) var chainSequence: [String] = []
     @Published var chainNote = ""
+    @Published private(set) var notificationsEnabled =
+        UserDefaults.standard.object(forKey: "notificationsEnabled") == nil
+            || UserDefaults.standard.bool(forKey: "notificationsEnabled")
+    @Published private(set) var quickBarEnabled =
+        UserDefaults.standard.object(forKey: "quickBarEnabled") == nil
+            || UserDefaults.standard.bool(forKey: "quickBarEnabled")
+    @Published private(set) var chainTemplates = RelayChainTemplate.load()
+    @Published private(set) var paneTaskIDs: [String] = []
+    var onTaskEvents: (([RelayNotificationEvent]) -> Void)?
+    private var notificationBaseline: [String: RelayTaskStatus]?
 
     private var monitoringTask: Task<Void, Never>?
     private var isComposingNewThread = false
@@ -315,6 +370,18 @@ final class RelayService: ObservableObject {
         runtimeDirectory.appendingPathComponent(RelayProtocol.daemonPropertyListName)
     }
 
+    var daemonLogURL: URL {
+        runtimeDirectory.appendingPathComponent("relayd.log")
+    }
+
+    func openDaemonLog() {
+        let path = daemonLogURL.path
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: Data())
+        }
+        NSWorkspace.shared.open(daemonLogURL)
+    }
+
     init() {
         let support = FileManager.default.urls(
             for: .applicationSupportDirectory,
@@ -332,8 +399,24 @@ final class RelayService: ObservableObject {
         socketURL = runtimeDirectory.appendingPathComponent(RelayProtocol.socketName)
         let home = homeDirectory
         let savedDirectory = UserDefaults.standard.string(forKey: "workingDirectory")
-        workingDirectory = savedDirectory ?? home.path
-        defaultWorkingDirectory = savedDirectory ?? home.path
+        let savedCandidate = URL(
+            fileURLWithPath: savedDirectory ?? home.path
+        ).standardizedFileURL.path
+        var savedCandidateIsDirectory = ObjCBool(false)
+        let initialDirectory = FileManager.default.fileExists(
+            atPath: savedCandidate,
+            isDirectory: &savedCandidateIsDirectory
+        ) && savedCandidateIsDirectory.boolValue ? savedCandidate : home.path
+        workingDirectory = initialDirectory
+        defaultWorkingDirectory = initialDirectory
+        let initialRecentDirectories = RelayProjectHistory.load(
+            currentDirectory: initialDirectory
+        )
+        recentWorkingDirectories = initialRecentDirectories
+        UserDefaults.standard.set(
+            initialRecentDirectories,
+            forKey: RelayProjectHistory.defaultsKey
+        )
         let catalog = Self.loadCodexModels(home: home)
         mixModels = catalog.models
         mixEffortsByModel = catalog.efforts
@@ -355,7 +438,12 @@ final class RelayService: ObservableObject {
             bundledDirectory: bundledAdapterDirectory,
             userDirectory: adapterDirectory,
             home: home,
-            genericAdapter: genericAdapterURL
+            genericAdapter: genericAdapterURL,
+            codexModels: catalog.models,
+            claudeModels: RelayClaudeModels.discover(
+                binaryURL: RelayClaudeModels.resolveBinary(home: home),
+                accountConfigURL: home.appendingPathComponent(".claude.json")
+            )
         )
         if !agents.contains(where: { $0.id == selectedAgentID }) {
             selectedAgentID = agents.first?.id ?? ""
@@ -810,7 +898,42 @@ final class RelayService: ObservableObject {
     }
 
     func handoff(to agentID: String, instruction: String) async {
-        guard !isSubmitting, let source = selectedTask else { return }
+        guard let source = selectedTask else { return }
+        await relayContext(
+            from: source,
+            to: agentID,
+            body: { output in
+                let transcript = ThreadCatalog.transcriptText(output)
+                let extra = instruction.isEmpty ? "请基于以上上下文继续处理。" : instruction
+                return "以下是与 \(source.adapterID) 的既有对话上下文：\n\n\(transcript)\n\n\(extra)"
+            },
+            provenanceOption: "relay_handoff_from",
+            titlePrefix: "⇄"
+        )
+    }
+
+    func promoteCompareMember(_ taskID: String, to agentID: String) async {
+        guard let source = tasks.first(where: { $0.id == taskID }) else { return }
+        await relayContext(
+            from: source,
+            to: agentID,
+            body: { output in
+                let answer = ThreadCatalog.lastTurnAnswer(output)
+                return "以下是多智能体对比中被选中的最佳答案（来自 \(source.adapterID)），请基于它继续：\n\n\(answer)"
+            },
+            provenanceOption: "relay_pick_from",
+            titlePrefix: "★"
+        )
+    }
+
+    private func relayContext(
+        from source: RelayTask,
+        to agentID: String,
+        body: ([RelayTaskOutput]) -> String,
+        provenanceOption: String,
+        titlePrefix: String
+    ) async {
+        guard !isSubmitting else { return }
         guard source.status.isTerminal else {
             errorMessage = "The selected task is still running."
             return
@@ -823,7 +946,10 @@ final class RelayService: ObservableObject {
         isSubmitting = true
         defer { isSubmitting = false }
         do {
-            var sourceOutput = output
+            var sourceOutput = source.id == selectedTaskID ? output : []
+            if sourceOutput.isEmpty {
+                sourceOutput = groupOutputs[source.id] ?? []
+            }
             if sourceOutput.isEmpty {
                 let response = try await request(["output", source.id])
                 guard response.type == "task_output", let received = response.output else {
@@ -831,22 +957,20 @@ final class RelayService: ObservableObject {
                 }
                 sourceOutput = received
             }
-            let transcript = ThreadCatalog.transcriptText(sourceOutput)
-            let extra = instruction.isEmpty ? "请基于以上上下文继续处理。" : instruction
-            let prompt = "以下是与 \(source.adapterID) 的既有对话上下文：\n\n\(transcript)\n\n\(extra)"
+            let prompt = body(sourceOutput)
             let response = try await request([
                 "start",
-                "--adapter", agentID,
+                "--adapter", target.id,
                 "--stdin",
                 "--cwd", source.cwd,
-                "--option", "relay_handoff_from=\(source.shortID)",
-            ] + adapterOptionArguments(for: agentID), input: Data(prompt.utf8))
+                "--option", "\(provenanceOption)=\(source.shortID)",
+            ] + adapterOptionArguments(for: target.id), input: Data(prompt.utf8))
             guard response.type == "task", let task = response.task else {
                 throw RelayClientError.invalidResponse(response.type)
             }
             _ = try? await request([
                 "rename", task.id,
-                "--title", "⇄ \(String(source.displayTitle.prefix(48)))",
+                "--title", "\(titlePrefix) \(String(source.displayTitle.prefix(48)))",
             ])
             selectedTaskID = task.id
             isComposingNewThread = false
@@ -947,12 +1071,111 @@ final class RelayService: ObservableObject {
         UserDefaults.standard.set(path, forKey: "workingDirectory")
     }
 
+    func setNotificationsEnabled(_ enabled: Bool) {
+        notificationsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "notificationsEnabled")
+    }
+
+    func saveChainTemplate(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, chainSequence.count >= 2 else { return }
+        var templates = chainTemplates.filter { $0.name != trimmed }
+        templates.append(RelayChainTemplate(
+            name: String(trimmed.prefix(40)),
+            agents: chainSequence,
+            note: chainNote
+        ))
+        chainTemplates = templates.sorted { $0.name < $1.name }
+        RelayChainTemplate.store(chainTemplates)
+    }
+
+    func applyChainTemplate(_ template: RelayChainTemplate) {
+        let missing = template.agents.filter { id in
+            agents.first(where: { $0.id == id })?.isAvailable != true
+        }
+        guard missing.isEmpty else {
+            errorMessage = RelayClientError.unavailableAgent(
+                missing.joined(separator: ", ")
+            ).localizedDescription
+            return
+        }
+        if !chainMode {
+            toggleChainMode()
+        }
+        chainSequence = template.agents
+        chainNote = template.note
+    }
+
+    func deleteChainTemplate(_ template: RelayChainTemplate) {
+        chainTemplates.removeAll { $0.name == template.name }
+        RelayChainTemplate.store(chainTemplates)
+    }
+
+    func setQuickBarEnabled(_ enabled: Bool) {
+        quickBarEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "quickBarEnabled")
+    }
+
+    func quickSubmit(agentID: String, prompt: String) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard let agent = agents.first(where: { $0.id == agentID }),
+              agent.isAvailable else {
+            errorMessage = RelayClientError.unavailableAgent(agentID).localizedDescription
+            return
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: defaultWorkingDirectory,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            errorMessage = RelayClientError.invalidDirectory(defaultWorkingDirectory)
+                .localizedDescription
+            return
+        }
+        do {
+            let response = try await request([
+                "start",
+                "--adapter", agent.id,
+                "--stdin",
+                "--cwd", defaultWorkingDirectory,
+            ] + adapterOptionArguments(for: agent.id), input: Data(trimmed.utf8))
+            guard response.type == "task", let task = response.task else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            selectedTaskID = task.id
+            isComposingNewThread = false
+            await refreshTasks(showErrors: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func setDefaultWorkingDirectory(_ path: String) {
         defaultWorkingDirectory = path
         if selectedTaskID == nil {
             workingDirectory = path
         }
         UserDefaults.standard.set(path, forKey: "workingDirectory")
+    }
+
+    func activateProjectDirectory(_ path: String) {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        var isDirectory = ObjCBool(false)
+        guard FileManager.default.fileExists(atPath: normalized, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            errorMessage = RelayClientError.invalidDirectory(normalized).localizedDescription
+            return
+        }
+        setDefaultWorkingDirectory(normalized)
+        recentWorkingDirectories = RelayProjectHistory.recording(
+            normalized,
+            in: recentWorkingDirectories
+        )
+        UserDefaults.standard.set(
+            recentWorkingDirectories,
+            forKey: RelayProjectHistory.defaultsKey
+        )
     }
 
     func setMixModel(_ model: String, persist: Bool = true) {
@@ -1009,6 +1232,14 @@ final class RelayService: ObservableObject {
 
     private func applyTaskList(_ receivedTasks: [RelayTask], showErrors: Bool) async {
         tasks = receivedTasks.sorted { $0.updatedAtMilliseconds > $1.updatedAtMilliseconds }
+        let events = RelayNotificationPlanner.events(
+            previous: notificationBaseline,
+            current: tasks
+        )
+        notificationBaseline = RelayNotificationPlanner.baseline(tasks)
+        if !events.isEmpty {
+            onTaskEvents?(events)
+        }
         if let selectedTaskID, !tasks.contains(where: { $0.id == selectedTaskID }) {
             self.selectedTaskID = nil
             output = []
@@ -1022,14 +1253,24 @@ final class RelayService: ObservableObject {
         if selectedTaskID == nil {
             selectFallbackAgentIfNeeded()
         }
+        paneTaskIDs = paneTaskIDs.filter { id in tasks.contains { $0.id == id } }
+        var retained = Set(paneTaskIDs).union(pinnedOutputTaskIDs)
+        if let group = selectedTask?.compareGroup {
+            for member in tasks where member.compareGroup == group {
+                retained.insert(member.id)
+            }
+        }
+        for key in groupOutputs.keys where !retained.contains(key) {
+            groupOutputs.removeValue(forKey: key)
+            groupSyncKeys.removeValue(forKey: key)
+            groupSyncSkips.removeValue(forKey: key)
+        }
+        for paneID in paneTaskIDs {
+            await fetchOutputIfStale(taskID: paneID, showErrors: false)
+        }
         if selectedTask?.compareGroup != nil {
             await refreshGroupOutputs(showErrors: showErrors)
         } else {
-            if !groupOutputs.isEmpty {
-                groupOutputs = [:]
-                groupSyncKeys = [:]
-                groupSyncSkips = [:]
-            }
             await refreshSelectedOutput(showErrors: showErrors)
         }
         daemonState = .online
@@ -1142,7 +1383,22 @@ final class RelayService: ObservableObject {
         action: String? = nil,
         answers: [String: [String]] = [:]
     ) async {
-        guard let task = selectedTask,
+        guard let task = selectedTask else { return }
+        await respondToInteraction(
+            taskID: task.id,
+            interaction: interaction,
+            action: action,
+            answers: answers
+        )
+    }
+
+    func respondToInteraction(
+        taskID: String,
+        interaction: RelayInteraction,
+        action: String? = nil,
+        answers: [String: [String]] = [:]
+    ) async {
+        guard let task = tasks.first(where: { $0.id == taskID }),
               task.pendingInteraction?.id == interaction.id,
               respondingInteractionID == nil else { return }
         respondingInteractionID = interaction.id
@@ -1234,28 +1490,215 @@ final class RelayService: ObservableObject {
     private func refreshGroupOutputs(showErrors: Bool) async {
         guard let selectedTaskID, let group = selectedTask?.compareGroup else { return }
         for member in tasks where member.compareGroup == group {
-            let key = "\(member.id):\(member.updatedAtMilliseconds):\(member.status.rawValue)"
-            let skips = groupSyncSkips[member.id] ?? 0
-            if key == groupSyncKeys[member.id], skips < 5 {
-                groupSyncSkips[member.id] = skips + 1
-                continue
-            }
-            do {
-                let response = try await request(["output", member.id])
-                guard response.type == "task_output", let received = response.output else {
-                    throw RelayClientError.invalidResponse(response.type)
-                }
-                groupOutputs[member.id] = received
-                groupSyncKeys[member.id] = key
-                groupSyncSkips[member.id] = 0
-            } catch {
-                if showErrors {
-                    errorMessage = error.localizedDescription
-                }
-            }
+            await fetchOutputIfStale(taskID: member.id, showErrors: showErrors)
         }
         output = groupOutputs[selectedTaskID] ?? []
         outputTruncated = false
+    }
+
+    private func fetchOutputIfStale(taskID: String, showErrors: Bool) async {
+        guard let task = tasks.first(where: { $0.id == taskID }) else { return }
+        let key = "\(task.id):\(task.updatedAtMilliseconds):\(task.status.rawValue)"
+        let skips = groupSyncSkips[taskID] ?? 0
+        if key == groupSyncKeys[taskID], skips < 5 {
+            groupSyncSkips[taskID] = skips + 1
+            return
+        }
+        do {
+            let response = try await request(["output", taskID])
+            guard response.type == "task_output", let received = response.output else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            groupOutputs[taskID] = received
+            groupSyncKeys[taskID] = key
+            groupSyncSkips[taskID] = 0
+        } catch {
+            if showErrors {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    var paneTasks: [RelayTask] {
+        paneTaskIDs.compactMap { id in tasks.first { $0.id == id } }
+    }
+
+    func pinSelectedThreadAsPane() {
+        guard let id = selectedTaskID,
+              !paneTaskIDs.contains(id),
+              paneTaskIDs.count < 3 else { return }
+        paneTaskIDs.append(id)
+        Task { await fetchOutputIfStale(taskID: id, showErrors: false) }
+    }
+
+    func closePane(_ taskID: String) {
+        paneTaskIDs.removeAll { $0 == taskID }
+    }
+
+    func continueThread(taskID: String, prompt: String) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let task = tasks.first(where: { $0.id == taskID }),
+              task.status.isTerminal,
+              task.sessionID != nil else { return }
+        do {
+            let response = try await request(
+                ["continue", taskID, "--stdin"] + adapterOptionArguments(for: task.adapterID),
+                input: Data(trimmed.utf8)
+            )
+            guard response.type == "task", response.task != nil else {
+                throw RelayClientError.invalidResponse(response.type)
+            }
+            errorMessage = nil
+            await refreshTasks(showErrors: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    // MARK: - Dialogue primitives (background tasks, no selection changes)
+
+    func startDialogueTask(agentID: String, prompt: String) async throws -> String {
+        guard let agent = agents.first(where: { $0.id == agentID }),
+              agent.isAvailable else {
+            throw RelayClientError.unavailableAgent(agentID)
+        }
+        let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(defaultWorkingDirectory)
+        let response = try await request([
+            "start", "--adapter", agent.id, "--stdin", "--cwd", cwd,
+        ] + adapterOptionArguments(for: agent.id), input: Data(prompt.utf8))
+        guard response.type == "task", let task = response.task else {
+            throw RelayClientError.invalidResponse(response.type)
+        }
+        await refreshTasks(showErrors: false)
+        return task.id
+    }
+
+    func continueDialogueTask(taskID: String, prompt: String) async throws {
+        guard let task = tasks.first(where: { $0.id == taskID }),
+              task.status.isTerminal,
+              task.sessionID != nil else {
+            throw RelayClientError.invalidResponse("dialogue_thread_not_resumable")
+        }
+        let response = try await request(
+            ["continue", taskID, "--stdin"] + adapterOptionArguments(for: task.adapterID),
+            input: Data(prompt.utf8)
+        )
+        guard response.type == "task", response.task != nil else {
+            throw RelayClientError.invalidResponse(response.type)
+        }
+        await refreshTasks(showErrors: false)
+    }
+
+    func taskSnapshot(_ id: String) -> RelayTask? {
+        tasks.first { $0.id == id }
+    }
+
+    func outputItems(taskID: String) async -> [RelayTaskOutput] {
+        guard let response = try? await request(["output", taskID]),
+              response.type == "task_output",
+              let received = response.output else {
+            return []
+        }
+        return received
+    }
+
+    func cancelBackgroundTask(_ id: String) async {
+        guard let task = tasks.first(where: { $0.id == id }),
+              !task.status.isTerminal else { return }
+        _ = try? await request(["cancel", id])
+        await refreshTasks(showErrors: false)
+    }
+
+    /// Task IDs whose cached outputs must survive task-list pruning because a
+    /// workspace window engine is watching them.
+    private var pinnedOutputTaskIDs: Set<String> = []
+
+    func pinOutputs(_ ids: [String]) {
+        pinnedOutputTaskIDs.formUnion(ids)
+    }
+
+    func unpinOutputs(_ ids: [String]) {
+        pinnedOutputTaskIDs.subtract(ids)
+    }
+
+    /// Sync-key cached output refresh for a window engine; results land in
+    /// `groupOutputs`.
+    func refreshMemberOutput(taskID: String) async {
+        await fetchOutputIfStale(taskID: taskID, showErrors: false)
+    }
+
+    /// Starts a task tagged with a `relay_group`, without touching selection.
+    func startGroupTask(
+        agentID: String, prompt: String, group: String
+    ) async throws -> String {
+        guard let agent = agents.first(where: { $0.id == agentID }),
+              agent.isAvailable else {
+            throw RelayClientError.unavailableAgent(agentID)
+        }
+        let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(defaultWorkingDirectory)
+        let response = try await request([
+            "start",
+            "--adapter", agent.id,
+            "--stdin",
+            "--cwd", cwd,
+            "--option", "relay_group=\(group)",
+        ] + adapterOptionArguments(for: agent.id), input: Data(prompt.utf8))
+        guard response.type == "task", let task = response.task else {
+            throw RelayClientError.invalidResponse(response.type)
+        }
+        await refreshTasks(showErrors: false)
+        return task.id
+    }
+
+    /// Submits a daemon-scheduled chain, without touching selection.
+    /// Returns the chain group ID shared by all step tasks.
+    func startChainRun(
+        sequence: [String], prompt: String, note: String
+    ) async throws -> String {
+        guard sequence.count >= 2 else {
+            throw RelayClientError.invalidResponse("chain_needs_two_steps")
+        }
+        if let missing = sequence.first(where: { id in
+            agents.first(where: { $0.id == id })?.isAvailable != true
+        }) {
+            throw RelayClientError.unavailableAgent(missing)
+        }
+        let cwd = RelayTerminalLauncher.resolvedWorkingDirectory(defaultWorkingDirectory)
+        let chain = UUID().uuidString.lowercased()
+        var arguments = [
+            "start-chain",
+            "--id", chain,
+            "--stdin",
+            "--cwd", cwd,
+        ]
+        for (index, adapterID) in sequence.enumerated() {
+            arguments += ["--step", adapterID]
+            for (key, value) in adapterOptions(for: adapterID)
+                .sorted(by: { $0.key < $1.key }) {
+                arguments += ["--step-option", "\(index + 1):\(key)=\(value)"]
+            }
+        }
+        let flattenedNote = note
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitizedNote = String(
+            flattenedNote.unicodeScalars
+                .filter { !CharacterSet.controlCharacters.contains($0) }
+                .map(String.init)
+                .joined()
+                .prefix(200)
+        )
+        if !sanitizedNote.isEmpty {
+            arguments += ["--note", sanitizedNote]
+        }
+        let response = try await request(arguments, input: Data(prompt.utf8))
+        guard response.type == "task", response.task != nil else {
+            throw RelayClientError.invalidResponse(response.type)
+        }
+        await refreshTasks(showErrors: false)
+        return chain
     }
 
     private func refreshSelectedOutput(showErrors: Bool, force: Bool = false) async {
@@ -1484,7 +1927,7 @@ final class RelayService: ObservableObject {
             "RunAtLoad": true,
             "StandardInputPath": "/dev/null",
             "StandardOutputPath": "/dev/null",
-            "StandardErrorPath": "/dev/null",
+            "StandardErrorPath": daemonLogURL.path,
         ]
         let data = try PropertyListSerialization.data(
             fromPropertyList: propertyList,
@@ -1510,7 +1953,12 @@ final class RelayService: ObservableObject {
             bundledDirectory: bundledAdapterDirectory,
             userDirectory: adapterDirectory,
             home: homeDirectory,
-            genericAdapter: genericAdapterURL
+            genericAdapter: genericAdapterURL,
+            codexModels: mixModels,
+            claudeModels: RelayClaudeModels.discover(
+                binaryURL: RelayClaudeModels.resolveBinary(home: homeDirectory),
+                accountConfigURL: homeDirectory.appendingPathComponent(".claude.json")
+            )
         )
         for index in agents.indices where agents[index].version == nil {
             agents[index].version = previousVersions[agents[index].id]

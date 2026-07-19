@@ -154,6 +154,38 @@ struct SettingsView: View {
             }
 
             settingsRow(
+                title: copy.text("Quick input bar"),
+                description: copy.text("Press Option-Space anywhere to send a task to the background daemon.")
+            ) {
+                HStack(spacing: 6) {
+                    Button(copy.text("On")) { relay.setQuickBarEnabled(true) }
+                        .buttonStyle(SettingsChoiceButtonStyle(selected: relay.quickBarEnabled))
+                    Button(copy.text("Off")) { relay.setQuickBarEnabled(false) }
+                        .buttonStyle(SettingsChoiceButtonStyle(selected: !relay.quickBarEnabled))
+                }
+            }
+
+            settingsRow(
+                title: copy.text("System notifications"),
+                description: copy.text("Notify when a background task finishes, fails, or waits for your response.")
+            ) {
+                HStack(spacing: 6) {
+                    Button(copy.text("On")) { relay.setNotificationsEnabled(true) }
+                        .buttonStyle(SettingsChoiceButtonStyle(selected: relay.notificationsEnabled))
+                    Button(copy.text("Off")) { relay.setNotificationsEnabled(false) }
+                        .buttonStyle(SettingsChoiceButtonStyle(selected: !relay.notificationsEnabled))
+                }
+            }
+
+            settingsRow(
+                title: copy.text("Daemon log"),
+                description: copy.text("relayd writes diagnostics to a local log file inside Application Support.")
+            ) {
+                Button(copy.text("Open log")) { relay.openDaemonLog() }
+                    .buttonStyle(SettingsActionButtonStyle())
+            }
+
+            settingsRow(
                 title: copy.text("Default working directory"),
                 description: copy.text("Used when creating a new thread. Existing threads keep their own working directory.")
             ) {
@@ -282,7 +314,7 @@ struct SettingsView: View {
         panel.directoryURL = URL(fileURLWithPath: relay.defaultWorkingDirectory)
         panel.prompt = copy.text("Choose…")
         if panel.runModal() == .OK, let url = panel.url {
-            relay.setDefaultWorkingDirectory(url.path)
+            relay.activateProjectDirectory(url.path)
         }
     }
 }

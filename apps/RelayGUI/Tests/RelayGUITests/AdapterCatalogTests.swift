@@ -355,6 +355,39 @@ struct AdapterCatalogTests {
     }
 
     @Test
+    func dynamicOptionValuesResolveFromCodexModelsWithDefaultSentinel() throws {
+        let root = try temporaryDirectory()
+        let adapter = root.appendingPathComponent("adapter")
+        try executable(at: adapter)
+        let manifest = root.appendingPathComponent("example.json")
+        try Data("""
+        {
+          "schema_version": 1,
+          "id": "example",
+          "name": "Example",
+          "detail": "Example CLI",
+          "adapter_executable": "adapter",
+          "capabilities": [],
+          "options": [
+            {"key": "codex_model", "values": ["default"], "values_from": "codex_models", "default": "default"}
+          ],
+          "requirements": []
+        }
+        """.utf8).write(to: manifest)
+
+        let resolved = AdapterCatalog.loadManifest(
+            at: manifest,
+            home: root,
+            codexModels: ["auto", "gpt-5.6-sol", "gpt-5.6-nova"]
+        )
+        #expect(resolved.options[0].values == ["default", "gpt-5.6-sol", "gpt-5.6-nova"])
+        #expect(resolved.options[0].defaultValue == "default")
+
+        let fallback = AdapterCatalog.loadManifest(at: manifest, home: root)
+        #expect(fallback.options[0].values == ["default"])
+    }
+
+    @Test
     func rejectsGenericCombinedWithExplicitExecutable() throws {
         let root = try temporaryDirectory()
         let manifest = root.appendingPathComponent("example.json")
