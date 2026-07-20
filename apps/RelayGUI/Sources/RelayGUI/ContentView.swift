@@ -131,6 +131,7 @@ struct ContentView: View {
     @State private var threadQuery = ""
     @State private var threadFilter: RelayThreadFilter = .all
     @State private var pendingDeletionTask: RelayTask?
+    @State private var pendingSessionHistoryDeletion: RelaySessionEntry?
     @State private var renamingTaskID: String?
     @State private var renameDraft = ""
     @State private var showingAdapterManager = false
@@ -139,6 +140,9 @@ struct ContentView: View {
     @State private var showingSaveTemplate = false
     @State private var expandedSessionProjects: Set<String> = Set(
         UserDefaults.standard.stringArray(forKey: "expandedSessionProjects") ?? []
+    )
+    @State private var hiddenProjectHistoryIDs: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: "hiddenProjectHistoryIDs") ?? []
     )
     @State private var chainTemplateName = ""
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
@@ -285,6 +289,29 @@ struct ContentView: View {
                 },
                 secondaryButton: .cancel()
             )
+        }
+        .confirmationDialog(
+            copy.text("DELETE SESSION"),
+            isPresented: Binding(
+                get: { pendingSessionHistoryDeletion != nil },
+                set: { if !$0 { pendingSessionHistoryDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button(copy.text("DELETE SESSION"), role: .destructive) {
+                guard let entry = pendingSessionHistoryDeletion else { return }
+                pendingSessionHistoryDeletion = nil
+                Task {
+                    for task in entry.tasks {
+                        await relay.deleteTask(task.id)
+                    }
+                }
+            }
+            Button(copy.text("Cancel"), role: .cancel) {
+                pendingSessionHistoryDeletion = nil
+            }
+        } message: {
+            Text(copy.text("Removes the daemon record permanently; running tasks are not deleted."))
         }
         .sheet(isPresented: $showingAdapterManager) {
             AdapterManagerView()
@@ -452,13 +479,23 @@ struct ContentView: View {
         let projects = RelaySessionCatalog.historyProjects(
             allEntries,
             knownProjectPaths: relay.recentWorkingDirectories
-        )
+        ).filter { !hiddenProjectHistoryIDs.contains($0.id) }
         return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 Text(copy.text("PROJECTS"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(RelayPalette.muted)
                 Spacer()
+                Button {
+                    chooseDirectory()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(RelayPalette.muted)
+                .help(copy.text("Add project…"))
                 Button {
                     animateWorkspaceChange {
                         terminals.showSessionLibrary()
@@ -512,38 +549,55 @@ struct ContentView: View {
     }
 
     private func historyProjectRow(_ project: RelayProjectHistoryGroup) -> some View {
-        return Button {
-            if expandedSessionProjects.contains(project.id) {
-                expandedSessionProjects.remove(project.id)
-            } else {
-                expandedSessionProjects.insert(project.id)
-            }
-            UserDefaults.standard.set(
-                Array(expandedSessionProjects), forKey: "expandedSessionProjects"
-            )
-        } label: {
-            HStack(spacing: 9) {
-                Image(systemName: "folder")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(RelayPalette.muted)
-                    .frame(width: 16)
-                Text(project.name)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(RelayPalette.text)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                if project.entries.contains(where: \.hasActiveTask) {
-                    Circle()
-                        .fill(RelayPalette.signal)
-                        .frame(width: 6, height: 6)
+        HStack(spacing: 2) {
+            Button {
+                if expandedSessionProjects.contains(project.id) {
+                    expandedSessionProjects.remove(project.id)
+                } else {
+                    expandedSessionProjects.insert(project.id)
                 }
+                UserDefaults.standard.set(
+                    Array(expandedSessionProjects), forKey: "expandedSessionProjects"
+                )
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(RelayPalette.muted)
+                        .frame(width: 16)
+                    Text(project.name)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    if project.entries.contains(where: \.hasActiveTask) {
+                        Circle()
+                            .fill(RelayPalette.signal)
+                            .frame(width: 6, height: 6)
+                    }
+                }
+                .padding(.leading, 8)
+                .frame(maxWidth: .infinity, minHeight: 30)
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 8)
-            .frame(height: 30)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Menu {
+                Button(copy.text("Remove from sidebar")) {
+                    hideProjectFromSidebar(project.id)
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 20, height: 20)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(RelayPalette.muted)
+            .help(copy.text("Remove from sidebar"))
         }
-        .buttonStyle(.plain)
     }
 
     private func projectHistoryRow(_ item: RelayProjectHistoryEntry) -> some View {
@@ -583,6 +637,33 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .help(item.title)
+        .contextMenu {
+            if case .session(let entry) = item.source {
+                Button(copy.text("DELETE SESSION"), role: .destructive) {
+                    pendingSessionHistoryDeletion = entry
+                }
+                .disabled(entry.hasActiveTask)
+            }
+        }
+    }
+
+    private func hideProjectFromSidebar(_ id: String) {
+        hiddenProjectHistoryIDs.insert(id)
+        expandedSessionProjects.remove(id)
+        UserDefaults.standard.set(
+            Array(hiddenProjectHistoryIDs), forKey: "hiddenProjectHistoryIDs"
+        )
+        UserDefaults.standard.set(
+            Array(expandedSessionProjects), forKey: "expandedSessionProjects"
+        )
+    }
+
+    private func revealProjectInSidebar(_ path: String) {
+        let id = RelaySessionCatalog.normalizedProjectPath(path)
+        guard hiddenProjectHistoryIDs.remove(id) != nil else { return }
+        UserDefaults.standard.set(
+            Array(hiddenProjectHistoryIDs), forKey: "hiddenProjectHistoryIDs"
+        )
     }
 
     /// Amber banner that exists only while tasks wait in USER GATE —
@@ -882,25 +963,7 @@ struct ContentView: View {
                     .padding(.top, 8)
             }
 
-            if terminals.zOrder.isEmpty {
-                if minimal {
-                    Text("└─ \(copy.text("NO WINDOWS"))")
-                        .font(.system(size: 10.5, design: .monospaced))
-                        .foregroundStyle(RelayPalette.muted)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
-                } else {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("┌─ \(copy.text("NO WINDOWS"))")
-                        Text("│ \(copy.text("Click an agent on the left"))")
-                        Text("│ \(copy.text("to open its real CLI here"))")
-                        Text("└─ \(copy.text("or use the LINK buttons above"))")
-                    }
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(RelayPalette.muted)
-                    .padding(18)
-                }
-            } else {
+            if !terminals.zOrder.isEmpty {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(terminals.sessions) { session in
@@ -1108,6 +1171,7 @@ struct ContentView: View {
     }
 
     private func activateProjectDirectory(_ path: String) {
+        revealProjectInSidebar(path)
         if reduceMotion {
             relay.activateProjectDirectory(path)
         } else {
