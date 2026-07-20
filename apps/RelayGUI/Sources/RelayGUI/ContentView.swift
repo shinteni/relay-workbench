@@ -890,7 +890,11 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(height: resolvedSidebarUpperHeight(availableHeight))
+            .frame(
+                height: resolvedSidebarUpperHeight(availableHeight),
+                alignment: .top
+            )
+            .clipped()
 
             sidebarResizeDivider(availableHeight: availableHeight)
 
