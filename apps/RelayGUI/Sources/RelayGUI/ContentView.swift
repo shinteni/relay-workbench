@@ -137,6 +137,9 @@ struct ContentView: View {
     @State private var focusedCompareMemberID: String?
     @State private var hasAutoFocusedComposer = false
     @State private var showingSaveTemplate = false
+    @State private var expandedSessionProjects: Set<String> = Set(
+        UserDefaults.standard.stringArray(forKey: "expandedSessionProjects") ?? []
+    )
     @State private var chainTemplateName = ""
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @StateObject private var terminals = RelayTerminalStore()
@@ -437,6 +440,167 @@ struct ContentView: View {
         }
     }
 
+    /// Claude/Codex-style session list: project folders over the daemon's
+    /// automatic records; click a title to reopen it as a window.
+    private var sessionsSection: some View {
+        let projects = RelaySessionCatalog.byProject(
+            RelaySessionCatalog.entries(tasks: relay.tasks)
+        )
+        let total = projects.reduce(0) { $0 + $1.entries.count }
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(RelayPalette.signal)
+                Text(copy.text("SESSIONS"))
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .tracking(0.7)
+                    .foregroundStyle(RelayPalette.muted)
+                Spacer()
+                Text("\(total)")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayPalette.signal)
+                Button {
+                    animateWorkspaceChange { terminals.showSessionLibrary() }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(RelayPalette.muted)
+                .help(copy.text("Search, rename or delete sessions"))
+            }
+            .padding(.horizontal, 2)
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(projects, id: \.path) { project in
+                        sessionFolderRow(project)
+                            .onAppear {
+                                seedExpandedSessionProjectsIfNeeded(projects)
+                            }
+                        if expandedSessionProjects.contains(project.path) {
+                            ForEach(project.entries.prefix(6)) { entry in
+                                sessionRow(entry)
+                            }
+                            if project.entries.count > 6 {
+                                Button {
+                                    animateWorkspaceChange {
+                                        terminals.showSessionLibrary()
+                                    }
+                                } label: {
+                                    Text(copy.text("… all ⟨N⟩ sessions")
+                                        .replacingOccurrences(
+                                            of: "⟨N⟩",
+                                            with: "\(project.entries.count)"
+                                        ))
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundStyle(RelayPalette.muted)
+                                        .padding(.leading, 22)
+                                        .padding(.vertical, 2)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 190)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    /// First launch: expand the folder of the current project, like Codex.
+    private func seedExpandedSessionProjectsIfNeeded(
+        _ projects: [(path: String, name: String, entries: [RelaySessionEntry])]
+    ) {
+        guard expandedSessionProjects.isEmpty else { return }
+        let current = RelaySessionCatalog.normalizedProjectPath(
+            RelayTerminalLauncher.resolvedWorkingDirectory(relay.workingDirectory)
+        )
+        let seeded = projects.contains { $0.path == current }
+            ? current : projects.first?.path
+        guard let seeded else { return }
+        expandedSessionProjects = [seeded]
+        UserDefaults.standard.set(
+            Array(expandedSessionProjects), forKey: "expandedSessionProjects"
+        )
+    }
+
+    private func sessionFolderRow(
+        _ project: (path: String, name: String, entries: [RelaySessionEntry])
+    ) -> some View {
+        Button {
+            if expandedSessionProjects.contains(project.path) {
+                expandedSessionProjects.remove(project.path)
+            } else {
+                expandedSessionProjects.insert(project.path)
+            }
+            UserDefaults.standard.set(
+                Array(expandedSessionProjects), forKey: "expandedSessionProjects"
+            )
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: expandedSessionProjects.contains(project.path)
+                    ? "folder" : "folder.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(RelayPalette.muted)
+                Text(project.name)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                if project.entries.contains(where: \.hasActiveTask) {
+                    Circle()
+                        .fill(RelayPalette.signal)
+                        .frame(width: 4, height: 4)
+                }
+                Text("\(project.entries.count)")
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(RelayPalette.muted)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sessionRow(_ entry: RelaySessionEntry) -> some View {
+        Button {
+            animateWorkspaceChange {
+                terminals.openSessionEntry(entry, relay: relay)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Text(entry.kind.glyph)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                    .frame(width: 10)
+                Text(entry.title)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(RelayPalette.text)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer()
+                if entry.hasActiveTask {
+                    Circle()
+                        .fill(RelayPalette.signal)
+                        .frame(width: 4, height: 4)
+                }
+            }
+            .padding(.leading, 22)
+            .padding(.trailing, 6)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(entry.title)
+    }
+
     /// Amber banner that exists only while tasks wait in USER GATE —
     /// approvals are a to-do, not a feature, so they only appear when due.
     @ViewBuilder private var approvalsBanner: some View {
@@ -724,6 +888,10 @@ struct ContentView: View {
                     .padding(.trailing, 18)
             }
 
+            if !relay.tasks.isEmpty {
+                sessionsSection
+            }
+
             if !terminals.savedDecisionCheckpoints.isEmpty
                 || terminals.decisionArchiveRejectedCount > 0 {
                 Button {
@@ -833,6 +1001,18 @@ struct ContentView: View {
                                 focused: terminals.focusedID == run.id,
                                 onFocus: { terminals.activate(run.id) },
                                 onClose: { terminals.closeChain(run) },
+                                onZoom: {
+                                    animateWorkspaceChange { terminals.toggleZoom(run.id) }
+                                }
+                            )
+                        }
+                        ForEach(terminals.threads) { run in
+                            ThreadSidebarRow(
+                                run: run,
+                                agents: relay.agents,
+                                focused: terminals.focusedID == run.id,
+                                onFocus: { terminals.activate(run.id) },
+                                onClose: { terminals.closeThread(run) },
                                 onZoom: {
                                     animateWorkspaceChange { terminals.toggleZoom(run.id) }
                                 }

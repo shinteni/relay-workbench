@@ -1238,6 +1238,7 @@ enum RelayWorkspaceItem: Identifiable {
     case dialogue(RelayDialogueRun)
     case compare(RelayCompareRun)
     case chain(RelayChainRun)
+    case thread(RelayThreadRun)
     case approvals(RelayApprovalPanel)
 
     var id: UUID {
@@ -1246,6 +1247,7 @@ enum RelayWorkspaceItem: Identifiable {
         case .dialogue(let run): run.id
         case .compare(let run): run.id
         case .chain(let run): run.id
+        case .thread(let run): run.id
         case .approvals(let panel): panel.id
         }
     }
@@ -1605,6 +1607,7 @@ final class RelayTerminalStore: ObservableObject {
     @Published private(set) var dialogues: [RelayDialogueRun] = []
     @Published private(set) var compares: [RelayCompareRun] = []
     @Published private(set) var chains: [RelayChainRun] = []
+    @Published private(set) var threads: [RelayThreadRun] = []
     @Published private(set) var approvalPanel: RelayApprovalPanel?
     /// Window frames in workspace coordinates, one per window.
     @Published private(set) var windowFrames: [UUID: CGRect] = [:]
@@ -1634,6 +1637,8 @@ final class RelayTerminalStore: ObservableObject {
     @Published private(set) var decisionRecoveryWitnessRejectedCount = 0
     @Published private(set) var decisionLibraryVisible = false
     @Published var decisionLibraryQuery = ""
+    @Published private(set) var sessionLibraryVisible = false
+    @Published var sessionLibraryQuery = ""
     @Published private(set) var selectedDecisionCheckpoint: RelayDecisionCheckpoint?
     @Published private(set) var liveDecisionCheckpointID: UUID?
     @Published private(set) var resultConfluenceReplayCheckpoint: RelayDecisionCheckpoint?
@@ -1707,6 +1712,9 @@ final class RelayTerminalStore: ObservableObject {
             }
             if let run = chain(id) {
                 return .chain(run)
+            }
+            if let run = threads.first(where: { $0.id == id }) {
+                return .thread(run)
             }
             if let panel = approvalPanel, panel.id == id {
                 return .approvals(panel)
@@ -2361,8 +2369,23 @@ final class RelayTerminalStore: ObservableObject {
         decisionLibraryReturnsToLiveDecision = returningToLiveDecision
         selectedDecisionCheckpoint = nil
         decisionLibraryVisible = true
+        sessionLibraryVisible = false
         resultArbitrationDecisionVisible = false
         promptStagingVisible = false
+    }
+
+    /// The session library fronts the daemon's automatic task records.
+    func showSessionLibrary() {
+        sessionLibraryVisible = true
+        decisionLibraryVisible = false
+        selectedDecisionCheckpoint = nil
+        resultArbitrationDecisionVisible = false
+        promptStagingVisible = false
+    }
+
+    func closeSessionLibrary() {
+        sessionLibraryVisible = false
+        sessionLibraryQuery = ""
     }
 
     func closeDecisionLibrary() {
@@ -3528,6 +3551,49 @@ final class RelayTerminalStore: ObservableObject {
         registerWindow(run.id)
     }
 
+    /// Opens (or raises) a floating window over one daemon thread.
+    func openThread(taskID: String, relay: RelayService) {
+        if let mounted = threads.first(where: { $0.taskID == taskID }) {
+            activate(mounted.id)
+            return
+        }
+        let run = RelayThreadRun(relay: relay, taskID: taskID)
+        threads.append(run)
+        registerWindow(run.id)
+    }
+
+    func closeThread(_ run: RelayThreadRun) {
+        run.close()
+        threads.removeAll { $0.id == run.id }
+        unregisterWindow(run.id)
+    }
+
+    /// Session-library "open": groups re-mount as compare/chain windows,
+    /// single tasks open as thread windows; mounted windows are raised.
+    func openSessionEntry(_ entry: RelaySessionEntry, relay: RelayService) {
+        switch entry.kind {
+        case .chain:
+            if let mounted = chains.first(where: { $0.chainID == entry.id }) {
+                activate(mounted.id)
+            } else {
+                openChain(RelayChainRun.attached(
+                    relay: relay, chain: entry.id, tasks: entry.tasks
+                ))
+            }
+        case .compare:
+            if let mounted = compares.first(where: { $0.groupID == entry.id }) {
+                activate(mounted.id)
+            } else {
+                openCompare(RelayCompareRun.attached(
+                    relay: relay, group: entry.id, tasks: entry.tasks
+                ))
+            }
+        case .single:
+            openThread(taskID: entry.id, relay: relay)
+        }
+        closeSessionLibrary()
+    }
+
     func closeChain(_ run: RelayChainRun) {
         run.close()
         chains.removeAll { $0.id == run.id }
@@ -3832,10 +3898,14 @@ final class RelayTerminalStore: ObservableObject {
         for run in chains {
             run.close()
         }
+        for run in threads {
+            run.close()
+        }
         sessions.removeAll()
         dialogues.removeAll()
         compares.removeAll()
         chains.removeAll()
+        threads.removeAll()
         approvalPanel = nil
         minimizedWindows.removeAll()
         windowFrames.removeAll()
@@ -3936,6 +4006,15 @@ struct RelayTerminalWorkspace: View {
                         )
                     case .chain(let run):
                         RelayChainWindow(
+                            store: store,
+                            run: run,
+                            agents: agents,
+                            frame: store.frame(for: run.id),
+                            canvasSize: proxy.size,
+                            focused: store.focusedID == run.id
+                        )
+                    case .thread(let run):
+                        RelayThreadWindow(
                             store: store,
                             run: run,
                             agents: agents,
@@ -4062,6 +4141,15 @@ struct RelayTerminalWorkspace: View {
                             ? .opacity
                             : .move(edge: .bottom).combined(with: .opacity)
                     )
+                } else if store.sessionLibraryVisible {
+                    RelaySessionLibraryDeck(store: store)
+                        .frame(maxWidth: 760)
+                        .padding(18)
+                        .transition(
+                            reduceMotion
+                                ? .opacity
+                                : .move(edge: .bottom).combined(with: .opacity)
+                        )
                 } else if store.decisionLibraryVisible {
                     RelayDecisionLibraryDeck(store: store)
                         .frame(maxWidth: 760)
@@ -4149,6 +4237,8 @@ struct RelayTerminalWorkspace: View {
                 return ("⋈", RelayPalette.signal, copy.text("COMPARE"))
             case .chain:
                 return ("›", RelayPalette.warning, copy.text("CHAIN"))
+            case .thread(let run):
+                return ("•", RelayPalette.signal, run.task?.displayTitle ?? copy.text("Thread"))
             case .approvals:
                 return ("◇", RelayPalette.warning, copy.text("Approvals"))
             }

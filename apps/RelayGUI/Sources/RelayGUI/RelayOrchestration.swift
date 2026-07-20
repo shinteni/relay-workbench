@@ -771,7 +771,7 @@ final class RelayChainRun: ObservableObject, Identifiable {
 }
 
 /// Shared plain-text rendering of task output items for orchestration windows.
-private struct RelayOutputLines: View {
+struct RelayOutputLines: View {
     let items: [RelayTaskOutput]
     let emptyHint: String
 
