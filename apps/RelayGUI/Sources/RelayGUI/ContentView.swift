@@ -440,87 +440,70 @@ struct ContentView: View {
         }
     }
 
-    /// Claude/Codex-style session list: project folders over the daemon's
-    /// automatic records; click a title to reopen it as a window.
-    private var sessionsSection: some View {
-        let projects = RelaySessionCatalog.byProject(
-            RelaySessionCatalog.entries(tasks: relay.tasks)
+    /// Codex と同様に、履歴の最上位をプロジェクトへ統一する。
+    /// daemon セッションと明示的に保存したチェックポイントは保存先を変えず、
+    /// 作業したプロジェクト配下にまとめて表示する。
+    private var projectHistorySection: some View {
+        let allEntries = RelaySessionCatalog.historyEntries(
+            tasks: relay.tasks,
+            checkpoints: terminals.savedDecisionCheckpoints,
+            annotations: terminals.decisionAnnotations
         )
-        let total = projects.reduce(0) { $0 + $1.entries.count }
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 7) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(RelayPalette.signal)
-                Text(copy.text("SESSIONS"))
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .tracking(0.7)
+        let projects = RelaySessionCatalog.historyProjects(
+            allEntries,
+            knownProjectPaths: relay.recentWorkingDirectories
+        )
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(copy.text("PROJECTS"))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(RelayPalette.muted)
                 Spacer()
-                Text("\(total)")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(RelayPalette.signal)
                 Button {
-                    animateWorkspaceChange { terminals.showSessionLibrary() }
+                    animateWorkspaceChange {
+                        terminals.showSessionLibrary()
+                    }
                 } label: {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(RelayPalette.muted)
-                .help(copy.text("Search, rename or delete sessions"))
+                .help(copy.text("Search project history"))
             }
-            .padding(.horizontal, 2)
+            .padding(.horizontal, 7)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(projects, id: \.path) { project in
-                        sessionFolderRow(project)
-                            .onAppear {
-                                seedExpandedSessionProjectsIfNeeded(projects)
-                            }
-                        if expandedSessionProjects.contains(project.path) {
-                            ForEach(project.entries.prefix(6)) { entry in
-                                sessionRow(entry)
-                            }
-                            if project.entries.count > 6 {
-                                Button {
-                                    animateWorkspaceChange {
-                                        terminals.showSessionLibrary()
-                                    }
-                                } label: {
-                                    Text(copy.text("… all ⟨N⟩ sessions")
-                                        .replacingOccurrences(
-                                            of: "⟨N⟩",
-                                            with: "\(project.entries.count)"
-                                        ))
-                                        .font(.system(size: 9, design: .monospaced))
-                                        .foregroundStyle(RelayPalette.muted)
-                                        .padding(.leading, 22)
-                                        .padding(.vertical, 2)
-                                }
-                                .buttonStyle(.plain)
+                    ForEach(projects) { project in
+                        historyProjectRow(project)
+                        if expandedSessionProjects.contains(project.id) {
+                            ForEach(project.entries) { entry in
+                                projectHistoryRow(entry)
                             }
                         }
                     }
                 }
             }
-            .frame(maxHeight: 190)
+            .frame(maxHeight: 250)
+            .onAppear {
+                seedExpandedSessionProjectsIfNeeded(projects)
+            }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
     }
 
     /// First launch: expand the folder of the current project, like Codex.
     private func seedExpandedSessionProjectsIfNeeded(
-        _ projects: [(path: String, name: String, entries: [RelaySessionEntry])]
+        _ projects: [RelayProjectHistoryGroup]
     ) {
         guard expandedSessionProjects.isEmpty else { return }
         let current = RelaySessionCatalog.normalizedProjectPath(
             RelayTerminalLauncher.resolvedWorkingDirectory(relay.workingDirectory)
         )
-        let seeded = projects.contains { $0.path == current }
-            ? current : projects.first?.path
+        let seeded = projects.contains { $0.id == current }
+            ? current : projects.first?.id
         guard let seeded else { return }
         expandedSessionProjects = [seeded]
         UserDefaults.standard.set(
@@ -528,26 +511,24 @@ struct ContentView: View {
         )
     }
 
-    private func sessionFolderRow(
-        _ project: (path: String, name: String, entries: [RelaySessionEntry])
-    ) -> some View {
-        Button {
-            if expandedSessionProjects.contains(project.path) {
-                expandedSessionProjects.remove(project.path)
+    private func historyProjectRow(_ project: RelayProjectHistoryGroup) -> some View {
+        return Button {
+            if expandedSessionProjects.contains(project.id) {
+                expandedSessionProjects.remove(project.id)
             } else {
-                expandedSessionProjects.insert(project.path)
+                expandedSessionProjects.insert(project.id)
             }
             UserDefaults.standard.set(
                 Array(expandedSessionProjects), forKey: "expandedSessionProjects"
             )
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: expandedSessionProjects.contains(project.path)
-                    ? "folder" : "folder.fill")
-                    .font(.system(size: 9))
+            HStack(spacing: 9) {
+                Image(systemName: "folder")
+                    .font(.system(size: 13, weight: .regular))
                     .foregroundStyle(RelayPalette.muted)
+                    .frame(width: 16)
                 Text(project.name)
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(RelayPalette.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -555,50 +536,53 @@ struct ContentView: View {
                 if project.entries.contains(where: \.hasActiveTask) {
                     Circle()
                         .fill(RelayPalette.signal)
-                        .frame(width: 4, height: 4)
+                        .frame(width: 6, height: 6)
                 }
-                Text("\(project.entries.count)")
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(RelayPalette.muted)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 8)
+            .frame(height: 30)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
-    private func sessionRow(_ entry: RelaySessionEntry) -> some View {
-        Button {
+    private func projectHistoryRow(_ item: RelayProjectHistoryEntry) -> some View {
+        let selected: Bool = switch item.source {
+        case .session(let entry): terminals.isSessionEntryFocused(entry)
+        case .decision(let checkpoint): terminals.selectedDecisionCheckpoint?.id == checkpoint.id
+        }
+        return Button {
             animateWorkspaceChange {
-                terminals.openSessionEntry(entry, relay: relay)
+                switch item.source {
+                case .session(let entry):
+                    terminals.openSessionEntry(entry, relay: relay)
+                case .decision(let checkpoint):
+                    terminals.openDecisionCheckpoint(checkpoint)
+                }
             }
         } label: {
-            HStack(spacing: 6) {
-                Text(entry.kind.glyph)
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(RelayPalette.muted)
-                    .frame(width: 10)
-                Text(entry.title)
-                    .font(.system(size: 10, design: .monospaced))
+            HStack(spacing: 7) {
+                Text(item.title)
+                    .font(.system(size: 12.5, weight: selected ? .medium : .regular))
                     .foregroundStyle(RelayPalette.text)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer()
-                if entry.hasActiveTask {
+                if item.hasActiveTask {
                     Circle()
                         .fill(RelayPalette.signal)
-                        .frame(width: 4, height: 4)
+                        .frame(width: 6, height: 6)
                 }
             }
-            .padding(.leading, 22)
-            .padding(.trailing, 6)
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
+            .padding(.leading, 29)
+            .padding(.trailing, 9)
+            .frame(height: 30)
+            .background(selected ? RelayPalette.text.opacity(0.10) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
-        .help(entry.title)
+        .help(item.title)
     }
 
     /// Amber banner that exists only while tasks wait in USER GATE —
@@ -888,47 +872,7 @@ struct ContentView: View {
                     .padding(.trailing, 18)
             }
 
-            if !relay.tasks.isEmpty {
-                sessionsSection
-            }
-
-            if !terminals.savedDecisionCheckpoints.isEmpty
-                || terminals.decisionArchiveRejectedCount > 0 {
-                Button {
-                    animateWorkspaceChange { terminals.showDecisionLibrary() }
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "archivebox.fill")
-                            .foregroundStyle(RelayPalette.mix)
-                        Text(copy.text("DECISIONS"))
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .tracking(0.7)
-                        Spacer()
-                        Text("\(terminals.savedDecisionCheckpoints.count)")
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .monospacedDigit()
-                            .foregroundStyle(RelayPalette.mix)
-                    }
-                    .padding(.horizontal, 9)
-                    .frame(height: 28)
-                    .background(RelayPalette.mix.opacity(0.07))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(RelayPalette.mix.opacity(0.22), lineWidth: 1)
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(
-                    terminals.contextRelayDraft != nil
-                        || terminals.resultConfluence != nil
-                        || terminals.promptStagingVisible
-                        || terminals.resultArbitrationDecisionVisible
-                )
-                .help(copy.text("OPEN DECISION LIBRARY"))
-                .padding(.horizontal, 10)
-                .padding(.top, 7)
-            }
+            projectHistorySection
 
             if let noticeKey = terminals.noticeKey {
                 Text(copy.text(noticeKey))

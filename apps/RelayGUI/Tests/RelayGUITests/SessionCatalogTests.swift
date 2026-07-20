@@ -134,4 +134,61 @@ extension SessionCatalogTests {
         #expect(projects[1].entries[0].hasActiveTask)
         #expect(projects[0].path == "/Users/x/beta")
     }
+
+    @Test
+    func projectHistoryCombinesSessionsAndLegacyDecisions() throws {
+        let snapshots = [
+            RelayResultSnapshot(
+                id: UUID(), agentName: "Claude", projectName: "demo", text: "方案甲"
+            ),
+            RelayResultSnapshot(
+                id: UUID(), agentName: "Codex", projectName: "demo", text: "方案乙"
+            ),
+        ]
+        let plan = try #require(RelayResultArbitration.plan(
+            instruction: "选择方案", snapshots: snapshots
+        ))
+        let checkpoint = RelayDecisionCheckpoint(
+            savedAt: Date(timeIntervalSince1970: 200),
+            decision: RelayResultArbitration.daemonDecision(
+                confluence: RelayResultConfluence(snapshots: snapshots),
+                plan: plan,
+                parentCheckpointID: nil,
+                judgeName: "Claude",
+                reply: "采用方案乙"
+            )
+        )
+        let annotation = try #require(RelayDecisionAnnotation(
+            checkpointID: checkpoint.id,
+            title: "发布决定",
+            tagsText: "",
+            isPinned: false
+        ))
+        let history = RelaySessionCatalog.historyEntries(
+            tasks: [task(id: "thread", title: "实现方案", updated: 100,
+                         cwd: "/Users/x/demo")],
+            checkpoints: [checkpoint],
+            annotations: [checkpoint.id: annotation]
+        )
+        let projects = RelaySessionCatalog.historyProjects(
+            history,
+            knownProjectPaths: ["/Users/x/demo", "/Users/x/empty"]
+        )
+
+        #expect(projects.map(\.name) == ["demo", "empty"])
+        #expect(projects[0].entries.map(\.title) == ["发布决定", "实现方案"])
+        #expect(projects[0].entries[0].projectPath == nil)
+        #expect(projects[1].entries.isEmpty)
+        #expect(RelaySessionCatalog.filterHistory(
+            history,
+            query: "发布",
+            annotations: [checkpoint.id: annotation]
+        ).map(\.title) == ["发布决定"])
+        #expect(RelaySessionCatalog.filterHistory(
+            history,
+            query: "",
+            sessionKind: .single,
+            annotations: [checkpoint.id: annotation]
+        ).map(\.title) == ["实现方案"])
+    }
 }

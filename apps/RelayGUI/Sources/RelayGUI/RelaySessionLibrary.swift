@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// Browsable front for the daemon's automatic task records: every dialogue
-/// seat, compare member, chain step and quick-bar task, grouped into
-/// sessions with rename, search, remount, continue and delete. Embedded
-/// terminal PTY content is never recorded here.
+/// 検索可能なプロジェクト履歴。
+/// daemon の自動セッションと明示保存したチェックポイントは既存の保存・再開方式を
+/// 維持したまま、同じナビゲーション面に表示する。
 struct RelaySessionLibraryDeck: View {
     @ObservedObject var store: RelayTerminalStore
     @EnvironmentObject private var relay: RelayService
@@ -22,15 +21,20 @@ struct RelaySessionLibraryDeck: View {
 
     private var copy: RelayCopy { RelayCopy(language: language) }
 
-    private var allEntries: [RelaySessionEntry] {
-        RelaySessionCatalog.entries(tasks: relay.tasks)
+    private var allEntries: [RelayProjectHistoryEntry] {
+        RelaySessionCatalog.historyEntries(
+            tasks: relay.tasks,
+            checkpoints: store.savedDecisionCheckpoints,
+            annotations: store.decisionAnnotations
+        )
     }
 
-    private var filteredEntries: [RelaySessionEntry] {
-        RelaySessionCatalog.filter(
+    private var filteredEntries: [RelayProjectHistoryEntry] {
+        RelaySessionCatalog.filterHistory(
             allEntries,
             query: store.sessionLibraryQuery,
-            kind: kindFilter
+            sessionKind: kindFilter,
+            annotations: store.decisionAnnotations
         )
     }
 
@@ -106,10 +110,10 @@ struct RelaySessionLibraryDeck: View {
                 .foregroundStyle(RelayPalette.signal)
                 .frame(width: 34, height: 26)
             VStack(alignment: .leading, spacing: 2) {
-                Text(copy.text("SESSION LIBRARY"))
+                Text(copy.text("PROJECT HISTORY"))
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .tracking(1.2)
-                Text(copy.text("What the daemon already records — terminals stay unrecorded"))
+                Text(copy.text("All work saved under each project"))
                     .font(.system(size: 8.5, design: .monospaced))
                     .foregroundStyle(RelayPalette.muted)
             }
@@ -142,7 +146,7 @@ struct RelaySessionLibraryDeck: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(searchFocused ? RelayPalette.signal : RelayPalette.muted)
             TextField(
-                copy.text("Search title, prompt, agent, project or ID"),
+                copy.text("Search project history"),
                 text: $store.sessionLibraryQuery
             )
             .textFieldStyle(.plain)
@@ -194,6 +198,61 @@ struct RelaySessionLibraryDeck: View {
             tint: selected ? RelayPalette.signal : RelayPalette.muted,
             prominent: selected
         ))
+    }
+
+    @ViewBuilder
+    private func row(_ item: RelayProjectHistoryEntry) -> some View {
+        switch item.source {
+        case .session(let entry):
+            row(entry)
+        case .decision(let checkpoint):
+            decisionRow(item, checkpoint: checkpoint)
+        }
+    }
+
+    private func decisionRow(
+        _ item: RelayProjectHistoryEntry,
+        checkpoint: RelayDecisionCheckpoint
+    ) -> some View {
+        let decision = checkpoint.decision
+        let route = (
+            decision.receipt.plan.sources.map(\.agentName)
+                + [decision.result.agentName]
+        ).joined(separator: " → ")
+        return HStack(spacing: 10) {
+            Image(systemName: "bookmark.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(RelayPalette.mix)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(RelayPalette.text)
+                    .lineLimit(1)
+                HStack(spacing: 7) {
+                    Text(route)
+                    Text("·")
+                    Text(item.projectName)
+                    Text("·")
+                    Text(checkpoint.savedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+                .font(.system(size: 8.5))
+                .foregroundStyle(RelayPalette.muted)
+                .lineLimit(1)
+            }
+            Spacer()
+            Button(copy.text("VIEW")) {
+                store.openDecisionCheckpoint(checkpoint)
+            }
+            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix))
+        }
+        .padding(9)
+        .background(RelayPalette.panel.opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(RelayPalette.line, lineWidth: 1)
+        }
     }
 
     private func row(_ entry: RelaySessionEntry) -> some View {
@@ -362,7 +421,7 @@ struct RelaySessionLibraryDeck: View {
     }
 
     private var emptyState: some View {
-        Text(copy.text("No sessions yet — dialogue, compare, chain and quick-bar tasks appear here automatically."))
+        Text(copy.text("No project history yet."))
             .font(.system(size: 9.5, design: .monospaced))
             .foregroundStyle(RelayPalette.muted)
             .padding(.vertical, 18)
@@ -370,7 +429,7 @@ struct RelaySessionLibraryDeck: View {
     }
 
     private var noMatchesState: some View {
-        Text(copy.text("No sessions match this search."))
+        Text(copy.text("No history matches this search."))
             .font(.system(size: 9.5, design: .monospaced))
             .foregroundStyle(RelayPalette.muted)
             .padding(.vertical, 18)
@@ -378,7 +437,7 @@ struct RelaySessionLibraryDeck: View {
     }
 
     private var footer: some View {
-        Text(copy.text("Records live in the local daemon · rename anytime · delete asks first"))
+        Text(copy.text("History stays on this Mac · open any item to continue"))
             .font(.system(size: 8, design: .monospaced))
             .foregroundStyle(RelayPalette.muted)
     }

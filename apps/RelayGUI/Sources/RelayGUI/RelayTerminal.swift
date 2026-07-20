@@ -2406,6 +2406,7 @@ final class RelayTerminalStore: ObservableObject {
         resultConfluenceReplayCheckpoint = nil
         selectedDecisionCheckpoint = checkpoint
         decisionLibraryVisible = false
+        sessionLibraryVisible = false
     }
 
     @discardableResult
@@ -3592,6 +3593,26 @@ final class RelayTerminalStore: ObservableObject {
             openThread(taskID: entry.id, relay: relay)
         }
         closeSessionLibrary()
+    }
+
+    func isSessionEntryFocused(_ entry: RelaySessionEntry) -> Bool {
+        switch entry.kind {
+        case .chain:
+            guard let run = chains.first(where: { $0.chainID == entry.id }) else {
+                return false
+            }
+            return focusedID == run.id
+        case .compare:
+            guard let run = compares.first(where: { $0.groupID == entry.id }) else {
+                return false
+            }
+            return focusedID == run.id
+        case .single:
+            guard let run = threads.first(where: { $0.taskID == entry.id }) else {
+                return false
+            }
+            return focusedID == run.id
+        }
     }
 
     func closeChain(_ run: RelayChainRun) {

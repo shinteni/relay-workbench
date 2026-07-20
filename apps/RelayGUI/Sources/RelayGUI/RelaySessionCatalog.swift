@@ -36,6 +36,31 @@ struct RelaySessionEntry: Identifiable, Equatable {
     }
 }
 
+/// サイドバーに表示するプロジェクト単位の履歴項目。
+/// セッションと保存済みチェックポイントの保存・再開方式は変えず、
+/// ユーザー向けのナビゲーションだけを統一する。
+struct RelayProjectHistoryEntry: Identifiable, Equatable {
+    enum Source: Equatable {
+        case session(RelaySessionEntry)
+        case decision(RelayDecisionCheckpoint)
+    }
+
+    let id: String
+    let title: String
+    let projectPath: String?
+    let projectName: String
+    let updatedAtMilliseconds: UInt64
+    let hasActiveTask: Bool
+    let source: Source
+}
+
+struct RelayProjectHistoryGroup: Identifiable, Equatable {
+    let id: String
+    let path: String?
+    let name: String
+    let entries: [RelayProjectHistoryEntry]
+}
+
 enum RelaySessionCatalog {
     /// Groups daemon tasks into session entries, newest activity first.
     /// Tasks sharing a `relay_group` become one compare/chain entry; the
@@ -146,6 +171,141 @@ enum RelaySessionCatalog {
                 name: RelayTerminalContext.projectName(path),
                 entries: buckets[path] ?? []
             )
+        }
+    }
+
+    static func historyEntries(
+        tasks: [RelayTask],
+        checkpoints: [RelayDecisionCheckpoint],
+        annotations: [UUID: RelayDecisionAnnotation]
+    ) -> [RelayProjectHistoryEntry] {
+        var history = entries(tasks: tasks).map { entry in
+            RelayProjectHistoryEntry(
+                id: "session:\(entry.id)",
+                title: entry.title,
+                projectPath: entry.projectPath,
+                projectName: entry.projectName,
+                updatedAtMilliseconds: entry.updatedAtMilliseconds,
+                hasActiveTask: entry.hasActiveTask,
+                source: .session(entry)
+            )
+        }
+        history.append(contentsOf: checkpoints.map { checkpoint in
+            let decision = checkpoint.decision
+            let route = (
+                decision.receipt.plan.sources.map(\.agentName)
+                    + [decision.result.agentName]
+            ).joined(separator: " → ")
+            let annotationTitle = annotations[checkpoint.id]?.title
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let milliseconds = max(0, checkpoint.savedAt.timeIntervalSince1970 * 1_000)
+            return RelayProjectHistoryEntry(
+                id: "decision:\(checkpoint.id.uuidString)",
+                title: annotationTitle.isEmpty ? route : annotationTitle,
+                projectPath: checkpoint.baseline?.projectPath,
+                projectName: decision.result.projectName,
+                updatedAtMilliseconds: UInt64(milliseconds),
+                hasActiveTask: false,
+                source: .decision(checkpoint)
+            )
+        })
+        return history.sorted {
+            if $0.updatedAtMilliseconds == $1.updatedAtMilliseconds {
+                return $0.id < $1.id
+            }
+            return $0.updatedAtMilliseconds > $1.updatedAtMilliseconds
+        }
+    }
+
+    /// Codex と同様のプロジェクトフォルダを組み立てる。
+    /// 履歴がない既知のローカルプロジェクトも表示し、パスを持たない旧形式の
+    /// チェックポイントは同名プロジェクトが一意の場合にそこへ関連付ける。
+    static func historyProjects(
+        _ entries: [RelayProjectHistoryEntry],
+        knownProjectPaths: [String]
+    ) -> [RelayProjectHistoryGroup] {
+        var order: [String] = []
+        var paths: [String: String] = [:]
+        var names: [String: String] = [:]
+        var buckets: [String: [RelayProjectHistoryEntry]] = [:]
+        var pathsByName: [String: Set<String>] = [:]
+
+        func registerPath(_ path: String) {
+            let normalizedPath = normalizedProjectPath(path)
+            guard paths[normalizedPath] == nil else { return }
+            let name = RelayTerminalContext.projectName(normalizedPath)
+            paths[normalizedPath] = normalizedPath
+            names[normalizedPath] = name
+            order.append(normalizedPath)
+            buckets[normalizedPath] = []
+            pathsByName[normalized(name), default: []].insert(normalizedPath)
+        }
+
+        knownProjectPaths.forEach(registerPath)
+        entries.compactMap(\.projectPath).forEach(registerPath)
+
+        for entry in entries {
+            let key: String
+            if let projectPath = entry.projectPath {
+                key = normalizedProjectPath(projectPath)
+            } else if let onlyPath = pathsByName[normalized(entry.projectName)]?.first,
+                      pathsByName[normalized(entry.projectName)]?.count == 1 {
+                key = onlyPath
+            } else {
+                key = "name:\(normalized(entry.projectName))"
+                if buckets[key] == nil {
+                    order.append(key)
+                    buckets[key] = []
+                    names[key] = entry.projectName
+                }
+            }
+            buckets[key, default: []].append(entry)
+        }
+
+        return order.map { key in
+            RelayProjectHistoryGroup(
+                id: key,
+                path: paths[key],
+                name: names[key] ?? key,
+                entries: (buckets[key] ?? []).sorted {
+                    if $0.updatedAtMilliseconds == $1.updatedAtMilliseconds {
+                        return $0.id < $1.id
+                    }
+                    return $0.updatedAtMilliseconds > $1.updatedAtMilliseconds
+                }
+            )
+        }
+    }
+
+    static func filterHistory(
+        _ entries: [RelayProjectHistoryEntry],
+        query: String,
+        sessionKind: RelaySessionKind? = nil,
+        annotations: [UUID: RelayDecisionAnnotation]
+    ) -> [RelayProjectHistoryEntry] {
+        let terms = query.split(whereSeparator: \.isWhitespace)
+            .map { normalized(String($0)) }
+            .filter { !$0.isEmpty }
+        return entries.filter { item in
+            switch item.source {
+            case .session(let entry):
+                guard sessionKind == nil || entry.kind == sessionKind else { return false }
+                guard !terms.isEmpty else { return true }
+                var fields = [
+                    entry.title, entry.agentsLabel, entry.projectName,
+                    entry.projectPath, entry.id,
+                ]
+                fields.append(contentsOf: entry.tasks.map(\.promptPreview))
+                fields.append(contentsOf: entry.tasks.compactMap(\.title))
+                let haystack = normalized(fields.joined(separator: "\n"))
+                return terms.allSatisfy(haystack.contains)
+            case .decision(let checkpoint):
+                guard sessionKind == nil else { return false }
+                guard !terms.isEmpty else { return true }
+                return !RelayDecisionSearch.filter(
+                    [checkpoint], query: query, annotations: annotations
+                ).isEmpty
+            }
         }
     }
 
