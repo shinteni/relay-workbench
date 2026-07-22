@@ -125,6 +125,8 @@ private extension RelayThreadFilter {
 }
 
 struct ContentView: View {
+    private static let sidebarDividerHeight: CGFloat = 17
+
     @EnvironmentObject private var relay: RelayService
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var prompt = ""
@@ -1101,10 +1103,9 @@ struct ContentView: View {
     ) -> CGFloat {
         let minimumUpperHeight: CGFloat = 250
         let minimumLowerHeight: CGFloat = 170
-        let dividerHeight: CGFloat = 11
         let maximumUpperHeight = max(
             minimumUpperHeight,
-            availableHeight - minimumLowerHeight - dividerHeight
+            availableHeight - minimumLowerHeight - Self.sidebarDividerHeight
         )
         return min(max(height, minimumUpperHeight), maximumUpperHeight)
     }
@@ -1112,16 +1113,18 @@ struct ContentView: View {
     private func sidebarResizeDivider(availableHeight: CGFloat) -> some View {
         ZStack {
             Rectangle()
-                .fill(RelayPalette.line)
+                .fill(sidebarDividerHovered || sidebarDividerDragging
+                    ? RelayPalette.signal.opacity(0.42)
+                    : RelayPalette.line)
                 .frame(height: 1)
             Capsule()
                 .fill(RelayPalette.muted.opacity(
-                    sidebarDividerHovered || sidebarDividerDragging ? 0.78 : 0.32
+                    sidebarDividerHovered || sidebarDividerDragging ? 0.92 : 0.58
                 ))
-                .frame(width: 28, height: 3)
+                .frame(width: 52, height: 4)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 11)
+        .frame(height: Self.sidebarDividerHeight)
         .contentShape(Rectangle())
         .onHover { inside in
             sidebarDividerHovered = inside
