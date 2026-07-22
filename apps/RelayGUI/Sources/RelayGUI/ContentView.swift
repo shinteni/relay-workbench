@@ -125,8 +125,6 @@ private extension RelayThreadFilter {
 }
 
 struct ContentView: View {
-    private static let sidebarDividerHeight: CGFloat = 17
-
     @EnvironmentObject private var relay: RelayService
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var prompt = ""
@@ -146,12 +144,6 @@ struct ContentView: View {
     @State private var hiddenProjectHistoryIDs: Set<String> = Set(
         UserDefaults.standard.stringArray(forKey: "hiddenProjectHistoryIDs") ?? []
     )
-    @State private var sidebarUpperHeight = CGFloat(
-        UserDefaults.standard.double(forKey: "sidebarUpperHeight")
-    )
-    @State private var sidebarResizeStart: CGFloat?
-    @State private var sidebarDividerHovered = false
-    @State private var sidebarDividerDragging = false
     @State private var chainTemplateName = ""
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @StateObject private var terminals = RelayTerminalStore()
@@ -336,11 +328,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         GeometryReader { proxy in
-            sidebarContent(
-                compact: proxy.size.height < 800,
-                minimal: proxy.size.height < 700,
-                availableHeight: proxy.size.height
-            )
+            sidebarContent(compact: proxy.size.height < 800)
         }
     }
 
@@ -476,10 +464,11 @@ struct ContentView: View {
         }
     }
 
-    /// Codex と同様に、履歴の最上位をプロジェクトへ統一する。
-    /// daemon セッションと明示的に保存したチェックポイントは保存先を変えず、
-    /// 作業したプロジェクト配下にまとめて表示する。
-    private var projectHistorySection: some View {
+    /// The sidebar's main body: projects own all flexible height.
+    /// A prominent card pins the working project on top; below it the
+    /// per-project history (daemon sessions + saved checkpoints) fills
+    /// every remaining pixel. Codex と同様に、履歴の最上位はプロジェクト。
+    private func projectZone(compact: Bool) -> some View {
         let allEntries = RelaySessionCatalog.historyEntries(
             tasks: relay.tasks,
             checkpoints: terminals.savedDecisionCheckpoints,
@@ -489,17 +478,15 @@ struct ContentView: View {
             allEntries,
             knownProjectPaths: relay.recentWorkingDirectories
         ).filter { !hiddenProjectHistoryIDs.contains($0.id) }
-        return VStack(alignment: .leading, spacing: 7) {
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text(copy.text("PROJECTS"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(RelayPalette.muted)
+                sectionLabel(copy.text("PROJECTS"))
                 Spacer()
                 Button {
                     chooseDirectory()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
@@ -511,33 +498,64 @@ struct ContentView: View {
                     }
                 } label: {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(RelayPalette.muted)
                 .help(copy.text("Search project history"))
+                Spacer()
+                    .frame(width: 10)
             }
-            .padding(.horizontal, 7)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(projects) { project in
-                        historyProjectRow(project)
-                        if expandedSessionProjects.contains(project.id) {
-                            ForEach(project.entries) { entry in
-                                projectHistoryRow(entry)
+            currentProjectCard(compact: compact)
+                .padding(.horizontal, 10)
+                .padding(.top, 2)
+                .padding(.bottom, compact ? 6 : 9)
+
+            if projects.isEmpty {
+                Text(copy.text("No project history yet."))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(RelayPalette.muted)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 8)
+            } else {
+                let duplicatedNames = Set(
+                    Dictionary(grouping: projects, by: \.name)
+                        .filter { $0.value.count > 1 }
+                        .keys
+                )
+                ScrollView(showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(projects) { project in
+                            historyProjectRow(
+                                project,
+                                disambiguated: duplicatedNames.contains(project.name)
+                            )
+                            if expandedSessionProjects.contains(project.id) {
+                                if project.entries.isEmpty {
+                                    Text(copy.text("No project history yet."))
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundStyle(RelayPalette.muted)
+                                        .padding(.leading, 33)
+                                        .padding(.vertical, 4)
+                                } else {
+                                    ForEach(project.entries) { entry in
+                                        projectHistoryRow(entry)
+                                    }
+                                }
                             }
                         }
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 8)
+                }
+                .onAppear {
+                    seedExpandedSessionProjectsIfNeeded(projects)
                 }
             }
-            .frame(maxHeight: terminals.zOrder.isEmpty ? .infinity : 250)
-            .onAppear {
-                seedExpandedSessionProjectsIfNeeded(projects)
-            }
         }
-        .padding(.horizontal, 6)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// First launch: expand the folder of the current project, like Codex.
@@ -557,8 +575,14 @@ struct ContentView: View {
         )
     }
 
-    private func historyProjectRow(_ project: RelayProjectHistoryGroup) -> some View {
-        HStack(spacing: 2) {
+    private func historyProjectRow(
+        _ project: RelayProjectHistoryGroup,
+        disambiguated: Bool = false
+    ) -> some View {
+        let isCurrent = project.path.map { path in
+            RelaySessionCatalog.normalizedProjectPath(path) == currentProjectID
+        } ?? false
+        return HStack(spacing: 2) {
             Button {
                 if expandedSessionProjects.contains(project.id) {
                     expandedSessionProjects.remove(project.id)
@@ -570,15 +594,22 @@ struct ContentView: View {
                 )
             } label: {
                 HStack(spacing: 9) {
-                    Image(systemName: "folder")
+                    Image(systemName: isCurrent ? "folder.fill" : "folder")
                         .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(RelayPalette.muted)
+                        .foregroundStyle(isCurrent ? RelayPalette.signal : RelayPalette.muted)
                         .frame(width: 16)
                     Text(project.name)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(RelayPalette.text)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if disambiguated, let parentHint = projectParentHint(project) {
+                        Text(parentHint)
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted.opacity(0.8))
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                    }
                     Spacer()
                     if project.entries.contains(where: \.hasActiveTask) {
                         Circle()
@@ -591,8 +622,14 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .help(project.path.map(abbreviatedProjectPath) ?? project.name)
 
             Menu {
+                if let path = project.path, !isCurrent {
+                    Button(copy.text("Use as current project")) {
+                        activateProjectDirectory(path)
+                    }
+                }
                 Button(copy.text("Remove from sidebar")) {
                     hideProjectFromSidebar(project.id)
                 }
@@ -605,8 +642,23 @@ struct ContentView: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .foregroundStyle(RelayPalette.muted)
-            .help(copy.text("Remove from sidebar"))
         }
+    }
+
+    /// Normalized id of the project new windows open in.
+    private var currentProjectID: String {
+        RelaySessionCatalog.normalizedProjectPath(
+            RelayTerminalLauncher.resolvedWorkingDirectory(relay.defaultWorkingDirectory)
+        )
+    }
+
+    /// Parent-directory hint that tells same-named project folders apart,
+    /// e.g. two 串联器 folders living under different roots.
+    private func projectParentHint(_ project: RelayProjectHistoryGroup) -> String? {
+        guard let path = project.path else { return nil }
+        let parent = (abbreviatedProjectPath(path) as NSString)
+            .deletingLastPathComponent
+        return parent.isEmpty ? nil : parent
     }
 
     private func projectHistoryRow(_ item: RelayProjectHistoryEntry) -> some View {
@@ -713,12 +765,12 @@ struct ContentView: View {
     private func linkButtonLabel(
         glyph: String, label: String, glyphTint: Color
     ) -> some View {
-        VStack(spacing: 4) {
+        HStack(spacing: 5) {
             Text(glyph)
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .foregroundStyle(glyphTint)
             Text(label)
-                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .tracking(0.5)
                 .lineLimit(1)
         }
@@ -756,149 +808,52 @@ struct ContentView: View {
         ))
     }
 
-    private func agentRail(compact: Bool) -> some View {
-        let anyActive = relay.tasks.contains { !$0.status.isTerminal }
-        return RoundedRectangle(cornerRadius: 1)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.03),
-                        Color.white.opacity(anyActive ? 0.26 : 0.20),
-                        Color.white.opacity(anyActive ? 0.26 : 0.20),
-                        Color.white.opacity(0.03),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .frame(width: 2)
-            .overlay {
-                if anyActive, !reduceMotion {
-                    TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                        let phase = context.date.timeIntervalSinceReferenceDate
-                            .truncatingRemainder(dividingBy: 2.2) / 2.2
-                        GeometryReader { proxy in
-                            Capsule()
-                                .fill(workspaceAccent.opacity(0.9))
-                                .frame(width: 2, height: 24)
-                                .offset(y: (proxy.size.height + 24) * phase - 24)
-                        }
-                    }
-                    .clipped()
-                }
-            }
-            .padding(.leading, 33)
-            .padding(.vertical, compact ? 14 : 22)
-            .allowsHitTesting(false)
-    }
-
-    private func sidebarContent(
-        compact: Bool,
-        minimal: Bool,
-        availableHeight: CGFloat
-    ) -> some View {
+    private func sidebarContent(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(alignment: .firstTextBaseline, spacing: 9) {
-                            Text(">")
-                                .font(.system(size: 19, weight: .bold, design: .monospaced))
-                                .foregroundStyle(RelayPalette.signal)
-                            Text("RELAY_")
-                                .font(.system(size: 20, weight: .bold, design: .monospaced))
-                                .tracking(-0.2)
-                        }
-                        daemonBadge
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 9) {
+                        Text(">")
+                            .font(.system(size: 19, weight: .bold, design: .monospaced))
+                            .foregroundStyle(RelayPalette.signal)
+                        Text("RELAY_")
+                            .font(.system(size: 20, weight: .bold, design: .monospaced))
+                            .tracking(-0.2)
                     }
-                    Spacer()
-                    Button {
-                        toggleSidebar()
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                            .frame(width: 12, height: 12)
-                    }
-                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                    .keyboardShortcut("\\", modifiers: .command)
-                    .help(copy.text("Collapse sidebar"))
-                    Button {
-                        openSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                            .frame(width: 12, height: 12)
-                    }
-                    .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                    .help(copy.text("Open Relay settings"))
+                    daemonBadge
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, compact ? 22 : 38)
-                .padding(.bottom, compact ? 10 : 18)
-
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        sectionLabel(copy.text("PROJECT"))
-                        projectDock(compact: compact, minimal: minimal)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 2)
-                            .padding(.bottom, compact ? 8 : 12)
-
-                        HStack {
-                            sectionLabel(copy.text("AGENTS"))
-                            Spacer()
-                            Button(copy.text("MANAGE")) {
-                                showingAdapterManager = true
-                            }
-                            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                            .help(copy.text("Manage adapter manifests"))
-                            Spacer()
-                                .frame(width: 12)
-                        }
-
-                        ZStack(alignment: .topLeading) {
-                            agentRail(compact: compact)
-                            VStack(spacing: compact ? 2 : 4) {
-                                ForEach(relay.agents) { agent in
-                                    AgentRow(
-                                        agent: agent,
-                                        activity: ThreadCatalog.activity(relay.tasks, agentID: agent.id),
-                                        selected: terminals.sessions.contains { $0.agentID == agent.id },
-                                        terminalCount: terminals.sessions.filter { $0.agentID == agent.id }.count,
-                                        compact: compact,
-                                        onStartDialogue: { openDialogue(preferredA: agent.id) }
-                                    ) {
-                                        openTerminal(agent: agent)
-                                    }
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                        }
-                        .padding(.bottom, 8)
-
-                        Rectangle()
-                            .fill(RelayPalette.line)
-                            .frame(height: 1)
-                            .padding(.vertical, 8)
-
-                        sectionLabel(copy.text("LINK"))
-                        linkActions
-                            .padding(.horizontal, 10)
-                            .padding(.top, 2)
-                            .padding(.bottom, 6)
-                        approvalsBanner
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 6)
-
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer()
+                Button {
+                    toggleSidebar()
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 12, height: 12)
                 }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .keyboardShortcut("\\", modifiers: .command)
+                .help(copy.text("Collapse sidebar"))
+                Button {
+                    openSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Open Relay settings"))
             }
-            .frame(
-                height: resolvedSidebarUpperHeight(availableHeight),
-                alignment: .top
-            )
-            .clipped()
+            .padding(.horizontal, 18)
+            .padding(.top, compact ? 22 : 38)
+            .padding(.bottom, compact ? 8 : 14)
 
-            sidebarResizeDivider(availableHeight: availableHeight)
+            approvalsBanner
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+
+            projectZone(compact: compact)
+
+            Rectangle()
+                .fill(RelayPalette.line)
+                .frame(height: 1)
 
             HStack {
                 sectionLabel(copy.text("WINDOWS"))
@@ -975,9 +930,7 @@ struct ContentView: View {
                     .foregroundStyle(RelayPalette.muted)
                     .padding(.trailing, 18)
             }
-
-            projectHistorySection
-                .layoutPriority(terminals.zOrder.isEmpty ? 1 : 0)
+            .padding(.top, 4)
 
             if let noticeKey = terminals.noticeKey {
                 Text(copy.text(noticeKey))
@@ -1073,9 +1026,10 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
+                .frame(maxHeight: compact ? 170 : 230)
             }
 
-            Spacer(minLength: 0)
+            bottomDock(compact: compact)
 
             HStack(spacing: 6) {
                 Image(systemName: "lock.fill")
@@ -1085,104 +1039,65 @@ struct ContentView: View {
             }
             .font(.system(size: 9, weight: .medium, design: .monospaced))
             .foregroundStyle(RelayPalette.muted)
-            .padding(18)
+            .padding(.horizontal, 18)
+            .padding(.vertical, compact ? 10 : 14)
         }
         .background(RelayPalette.panel)
     }
 
-    private func resolvedSidebarUpperHeight(_ availableHeight: CGFloat) -> CGFloat {
-        let preferredHeight = sidebarUpperHeight > 0
-            ? sidebarUpperHeight
-            : availableHeight * 0.70
-        return clampedSidebarUpperHeight(preferredHeight, availableHeight: availableHeight)
-    }
-
-    private func clampedSidebarUpperHeight(
-        _ height: CGFloat,
-        availableHeight: CGFloat
-    ) -> CGFloat {
-        let minimumUpperHeight: CGFloat = 250
-        let minimumLowerHeight: CGFloat = 170
-        let maximumUpperHeight = max(
-            minimumUpperHeight,
-            availableHeight - minimumLowerHeight - Self.sidebarDividerHeight
-        )
-        return min(max(height, minimumUpperHeight), maximumUpperHeight)
-    }
-
-    private func sidebarResizeDivider(availableHeight: CGFloat) -> some View {
-        ZStack {
+    /// Fixed compact dock under the projects: agent chips to open CLI
+    /// terminals plus the relay entry points. Never grows past a few rows —
+    /// the vertical space above belongs to projects.
+    private func bottomDock(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             Rectangle()
-                .fill(sidebarDividerHovered || sidebarDividerDragging
-                    ? RelayPalette.signal.opacity(0.42)
-                    : RelayPalette.line)
+                .fill(RelayPalette.line)
                 .frame(height: 1)
-            Capsule()
-                .fill(RelayPalette.muted.opacity(
-                    sidebarDividerHovered || sidebarDividerDragging ? 0.92 : 0.58
-                ))
-                .frame(width: 52, height: 4)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: Self.sidebarDividerHeight)
-        .contentShape(Rectangle())
-        .onHover { inside in
-            sidebarDividerHovered = inside
-            if inside {
-                NSCursor.resizeUpDown.push()
-            } else {
-                NSCursor.pop()
+
+            HStack {
+                sectionLabel(copy.text("AGENTS"))
+                Spacer()
+                Button(copy.text("MANAGE")) {
+                    showingAdapterManager = true
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Manage adapter manifests"))
+                Spacer()
+                    .frame(width: 12)
             }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                .onChanged { value in
-                    if sidebarResizeStart == nil {
-                        sidebarResizeStart = resolvedSidebarUpperHeight(availableHeight)
-                        sidebarDividerDragging = true
+            .padding(.top, 4)
+
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 88, maximum: .infinity), spacing: 4)],
+                alignment: .leading,
+                spacing: 4
+            ) {
+                ForEach(relay.agents) { agent in
+                    AgentChip(
+                        agent: agent,
+                        activity: ThreadCatalog.activity(relay.tasks, agentID: agent.id),
+                        selected: terminals.sessions.contains { $0.agentID == agent.id },
+                        terminalCount: terminals.sessions.filter { $0.agentID == agent.id }.count,
+                        onStartDialogue: { openDialogue(preferredA: agent.id) }
+                    ) {
+                        openTerminal(agent: agent)
                     }
-                    guard let start = sidebarResizeStart else { return }
-                    sidebarUpperHeight = clampedSidebarUpperHeight(
-                        start + value.translation.height,
-                        availableHeight: availableHeight
-                    )
                 }
-                .onEnded { _ in
-                    sidebarResizeStart = nil
-                    sidebarDividerDragging = false
-                    UserDefaults.standard.set(
-                        Double(resolvedSidebarUpperHeight(availableHeight)),
-                        forKey: "sidebarUpperHeight"
-                    )
-                }
-        )
-        .help(copy.text("Drag to resize project area"))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(copy.text("Resize project area"))
-        .accessibilityAdjustableAction { direction in
-            let currentHeight = resolvedSidebarUpperHeight(availableHeight)
-            let delta: CGFloat
-            switch direction {
-            case .increment:
-                delta = -40
-            case .decrement:
-                delta = 40
-            @unknown default:
-                return
             }
-            sidebarUpperHeight = clampedSidebarUpperHeight(
-                currentHeight + delta,
-                availableHeight: availableHeight
-            )
-            UserDefaults.standard.set(
-                Double(sidebarUpperHeight),
-                forKey: "sidebarUpperHeight"
-            )
+            .padding(.horizontal, 10)
+            .padding(.top, 2)
+            .padding(.bottom, 7)
+
+            linkActions
+                .padding(.horizontal, 10)
         }
     }
 
-    private func projectDock(compact: Bool, minimal: Bool) -> some View {
-        HStack(spacing: 0) {
+    /// The working project, pinned above its history: every new window,
+    /// dialogue, compare and chain opens here. Click to switch, PAIR to
+    /// open Claude + Codex side by side.
+    private func currentProjectCard(compact: Bool) -> some View {
+        HStack(spacing: 8) {
             Menu {
                 Section(copy.text("RECENT PROJECTS")) {
                     ForEach(relay.recentWorkingDirectories, id: \.self) { path in
@@ -1202,51 +1117,33 @@ struct ContentView: View {
                     chooseDirectory()
                 }
             } label: {
-                HStack(spacing: 0) {
-                    ZStack(alignment: .bottom) {
-                        Circle()
-                            .stroke(RelayPalette.signal.opacity(0.32), lineWidth: 5)
-                            .frame(width: 18, height: 18)
-                        Circle()
-                            .fill(RelayPalette.signal)
-                            .frame(width: 6, height: 6)
-                        Rectangle()
-                            .fill(RelayPalette.signal.opacity(0.38))
-                            .frame(width: 2, height: 15)
-                            .offset(y: 18)
-                    }
-                    .frame(width: 46, height: 38)
-
-                    VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 9) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(RelayPalette.signal)
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(projectName(relay.defaultWorkingDirectory))
-                            .font(.system(size: 11.5, weight: .bold, design: .monospaced))
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundStyle(RelayPalette.text)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                         Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
-                            .font(.system(size: 9.5, design: .monospaced))
+                            .font(.system(size: 9, design: .monospaced))
                             .foregroundStyle(RelayPalette.muted)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        if !minimal {
-                            Text(copy.text("New windows use this project"))
-                                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                                .tracking(0.45)
-                                .foregroundStyle(RelayPalette.signal.opacity(0.9))
-                        }
                     }
-
-                    Spacer(minLength: 6)
-
+                    Spacer(minLength: 4)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(RelayPalette.signal)
-                        .padding(.trailing, 7)
                 }
+                .padding(.leading, 10)
                 .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
-            .help(copy.text("Switch project"))
+            .help("\(copy.text("Switch project")) · \(copy.text("New windows use this project"))")
             .accessibilityLabel(copy.text("Switch project"))
 
             Button {
@@ -1261,14 +1158,14 @@ struct ContentView: View {
             .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
             .help(copy.text("Open Claude and Codex for this project"))
             .accessibilityLabel(copy.text("Open Claude and Codex for this project"))
+            .padding(.trailing, 8)
         }
-        .padding(.vertical, compact ? 5 : 9)
-        .padding(.trailing, 9)
+        .padding(.vertical, compact ? 7 : 10)
         .background(RelayPalette.signal.opacity(0.055))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(RelayPalette.signal.opacity(0.18), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(RelayPalette.signal.opacity(0.20), lineWidth: 1)
         }
     }
 
@@ -2350,7 +2247,7 @@ struct LinkActionButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .foregroundStyle(configuration.isPressed ? RelayPalette.ink : tint)
-                .padding(.vertical, 8)
+                .padding(.vertical, 6)
                 .background(
                     configuration.isPressed
                         ? tint
@@ -2369,133 +2266,114 @@ struct LinkActionButtonStyle: ButtonStyle {
     }
 }
 
-private struct AgentRow: View {
+/// Compact agent chip: model pickers stay one glance wide. Click opens the
+/// CLI terminal; the tooltip carries version/health detail the old tall
+/// rows used to spell out, and the context menu keeps the dialogue entry.
+private struct AgentChip: View {
     @Environment(\.relayLanguage) private var language
     let agent: RelayAgent
     let activity: RelayAgentActivity
     let selected: Bool
     var terminalCount = 0
-    var compact = false
     var onStartDialogue: (() -> Void)?
     @State private var hovering = false
     let action: () -> Void
 
+    private var copy: RelayCopy { RelayCopy(language: language) }
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 ZStack(alignment: .bottomTrailing) {
-                    if selected {
-                        Circle()
-                            .fill(agent.accent.opacity(0.4))
-                            .frame(width: 30, height: 30)
-                            .blur(radius: 12)
-                    }
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(agent.accent.opacity(0.15))
-                        .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(RelayPalette.ink.opacity(0.85))
-                        )
-                        .frame(width: 28, height: 28)
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(agent.accent.opacity(selected ? 0.26 : 0.15))
+                        .frame(width: 20, height: 20)
                         .overlay {
-                            RoundedRectangle(cornerRadius: 7)
+                            RoundedRectangle(cornerRadius: 5)
                                 .stroke(agent.accent.opacity(0.45), lineWidth: 1)
                         }
                         .overlay {
                             Text(agent.monogram)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .tracking(0.5)
+                                .font(.system(size: 7.5, weight: .bold, design: .monospaced))
                                 .foregroundStyle(agent.accent)
                         }
                     Circle()
                         .fill(agent.health.color)
-                        .frame(width: 7, height: 7)
+                        .frame(width: 5.5, height: 5.5)
                         .overlay {
-                            Circle().stroke(RelayPalette.ink, lineWidth: 1.5)
+                            Circle().stroke(RelayPalette.ink, lineWidth: 1)
                         }
-                        .offset(x: 2, y: 2)
+                        .offset(x: 1.5, y: 1.5)
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(agent.name)
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    Text(agent.health.reason ?? agent.version ?? agent.detail)
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(RelayPalette.muted)
-                        .lineLimit(1)
-                }
-                Spacer()
-                if hovering, let onStartDialogue, agent.isAvailable {
-                    HStack(spacing: 4) {
-                        Button {
-                            onStartDialogue()
-                        } label: {
-                            Text("⇄")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .frame(width: 20, height: 20)
-                        }
-                        .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.mix))
-                        .help(RelayCopy(language: language).text("Start a dialogue with this agent"))
-                        Text("▣")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(agent.accent.opacity(0.8))
-                            .help(RelayCopy(language: language).text("Open its CLI terminal"))
-                    }
-                } else {
-                    VStack(alignment: .trailing, spacing: 4) {
-                        HStack(spacing: 4) {
-                            if terminalCount > 0 {
-                                Text("▣\(terminalCount > 1 ? "×\(terminalCount)" : "")")
-                                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(agent.accent.opacity(0.85))
-                            }
-                            Text(RelayCopy(language: language).agentHealth(agent.health))
-                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .foregroundStyle(agent.health.color)
-                        }
-                        if activity.hasWork {
-                            HStack(spacing: 4) {
-                                if activity.active > 0 {
-                                    Text("\(activity.active) \(RelayCopy(language: language).text("ACTIVE"))")
-                                        .foregroundStyle(RelayPalette.signal)
-                                }
-                                if activity.active > 0, activity.waiting > 0 {
-                                    Text("·")
-                                        .foregroundStyle(RelayPalette.muted)
-                                }
-                                if activity.waiting > 0 {
-                                    Text("\(activity.waiting) \(RelayCopy(language: language).text("WAITING"))")
-                                        .foregroundStyle(RelayPalette.warning)
-                                }
-                            }
-                            .font(.system(size: 7, weight: .bold, design: .monospaced))
-                            .monospacedDigit()
-                        }
-                    }
+                Text(agent.name)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(agent.isAvailable ? RelayPalette.text : RelayPalette.muted)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if terminalCount > 0 {
+                    Text(terminalCount > 1 ? "▣\(terminalCount)" : "▣")
+                        .font(.system(size: 7.5, weight: .bold, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(agent.accent.opacity(0.9))
+                } else if activity.active > 0 {
+                    Circle()
+                        .fill(RelayPalette.signal)
+                        .frame(width: 4, height: 4)
+                } else if activity.waiting > 0 {
+                    Circle()
+                        .fill(RelayPalette.warning)
+                        .frame(width: 4, height: 4)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, compact ? 3 : 11)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 selected
                     ? agent.accent.opacity(0.13)
-                    : hovering ? RelayPalette.hover : Color.clear
+                    : hovering ? RelayPalette.hover : RelayPalette.raised.opacity(0.4)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9))
-            .overlay(alignment: .leading) {
-                if selected {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(agent.accent)
-                        .frame(width: 2)
-                        .padding(.vertical, 9)
-                }
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(
+                        selected ? agent.accent.opacity(0.4) : RelayPalette.line,
+                        lineWidth: 1
+                    )
             }
-            .contentShape(RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
             .animation(.easeOut(duration: 0.12), value: hovering)
             .animation(RelayPalette.selectSpring, value: selected)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .help(chipHelp)
+        .contextMenu {
+            Button(copy.text("Open its CLI terminal")) {
+                action()
+            }
+            if let onStartDialogue {
+                Button(copy.text("Start a dialogue with this agent")) {
+                    onStartDialogue()
+                }
+                .disabled(!agent.isAvailable)
+            }
+        }
+    }
+
+    private var chipHelp: String {
+        let detail = agent.health.reason ?? agent.version ?? agent.detail
+        var parts = ["\(agent.name) · \(copy.agentHealth(agent.health))"]
+        if !detail.isEmpty {
+            parts.append(detail)
+        }
+        if activity.active > 0 {
+            parts.append("\(activity.active) \(copy.text("ACTIVE"))")
+        }
+        if activity.waiting > 0 {
+            parts.append("\(activity.waiting) \(copy.text("WAITING"))")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
