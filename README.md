@@ -7,7 +7,7 @@
 把 Claude Code、Codex、Grok、Ollama 等真实 CLI 的 TUI 并排嵌进一块自由画布，<br>
 让它们同时发送、顺序接力、圆桌对话、互相裁决——全部只发生在你的 Mac 上。
 
-**[产品主页 Landing Page ↗](https://shinteni-hikaso.github.io/relay-workbench/)**
+**[产品主页 Landing Page ↗](https://shinteni.github.io/relay-workbench/)**
 
 简体中文 / 日本語界面 · SwiftUI GUI + Rust daemon · 测试基线 Rust 113 项 + Swift 150 项
 
@@ -30,7 +30,7 @@
 依赖：macOS 14+ · Swift 5.9+ · Rust · Node.js
 
 ```bash
-git clone https://github.com/shinteni-hikaso/relay-workbench.git
+git clone https://github.com/shinteni/relay-workbench.git
 cd relay-workbench
 ./scripts/package-macos-app.sh        # 构建并打包 dist/Relay.app
 ditto dist/Relay.app ~/Applications/  # 安装，双击即用
