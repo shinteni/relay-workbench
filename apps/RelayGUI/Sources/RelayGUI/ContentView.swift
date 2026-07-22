@@ -145,6 +145,7 @@ struct ContentView: View {
         UserDefaults.standard.stringArray(forKey: "hiddenProjectHistoryIDs") ?? []
     )
     @State private var chainTemplateName = ""
+    @State private var projectNodePulsing = false
     @AppStorage("sidebarCollapsed") private var sidebarCollapsed = false
     @StateObject private var terminals = RelayTerminalStore()
     @FocusState private var promptFocused: Bool
@@ -464,10 +465,112 @@ struct ContentView: View {
         }
     }
 
+    /// Brand block drawn as the series circuit the app is named for:
+    /// prompt → daemon → current project, three anchors on one trace.
+    /// The structure is the story — input leaves the prompt, passes the
+    /// daemon, and lands in the project every new window opens in.
+    private func headerCircuit(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                circuitAnchor(top: false, bottom: true) {
+                    Text(">")
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.signal)
+                }
+                Text("RELAY_")
+                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                    .tracking(-0.3)
+                Spacer()
+                Button {
+                    toggleSidebar()
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .keyboardShortcut("\\", modifiers: .command)
+                .help(copy.text("Collapse sidebar"))
+                Button {
+                    openSettings()
+                } label: {
+                    Image(systemName: "gearshape")
+                        .frame(width: 12, height: 12)
+                }
+                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
+                .help(copy.text("Open Relay settings"))
+            }
+            .frame(height: 30)
+            .padding(.horizontal, 16)
+
+            if relay.daemonState != .online {
+                HStack(spacing: 10) {
+                    circuitAnchor(top: true, bottom: true) {
+                        StatusDot(
+                            color: RelayPalette.warning,
+                            live: relay.daemonState == .connecting
+                        )
+                    }
+                    Text("DAEMON \(copy.daemonState(relay.daemonState))")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.warning)
+                    if let version = relay.daemonVersion {
+                        Text("v\(version)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(RelayPalette.muted)
+                    }
+                    Spacer()
+                }
+                .frame(height: 22)
+                .padding(.horizontal, 16)
+            }
+
+            Rectangle()
+                .fill(RelayPalette.signal.opacity(0.28))
+                .frame(width: 1.5, height: compact ? 10 : 14)
+                .padding(.leading, 23.25)
+
+            currentProjectCard(compact: compact)
+                .padding(.horizontal, 10)
+        }
+        .padding(.top, compact ? 18 : 30)
+        .animation(reduceMotion ? nil : RelayPalette.selectSpring, value: relay.daemonState)
+        .onChange(of: relay.defaultWorkingDirectory) { _, _ in
+            guard !reduceMotion else { return }
+            withAnimation(.spring(response: 0.22, dampingFraction: 1.0)) {
+                projectNodePulsing = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                withAnimation(RelayPalette.selectSpring) {
+                    projectNodePulsing = false
+                }
+            }
+        }
+    }
+
+    /// One 16pt anchor column of the header trace: the glyph sits on the
+    /// line, with segments above/below joining it to its neighbours.
+    private func circuitAnchor<Glyph: View>(
+        top: Bool,
+        bottom: Bool,
+        @ViewBuilder glyph: () -> Glyph
+    ) -> some View {
+        VStack(spacing: 2) {
+            Rectangle()
+                .fill(RelayPalette.signal.opacity(top ? 0.28 : 0))
+                .frame(width: 1.5)
+                .frame(maxHeight: .infinity)
+            glyph()
+            Rectangle()
+                .fill(RelayPalette.signal.opacity(bottom ? 0.28 : 0))
+                .frame(width: 1.5)
+                .frame(maxHeight: .infinity)
+        }
+        .frame(width: 16)
+    }
+
     /// The sidebar's main body: projects own all flexible height.
-    /// A prominent card pins the working project on top; below it the
-    /// per-project history (daemon sessions + saved checkpoints) fills
-    /// every remaining pixel. Codex と同様に、履歴の最上位はプロジェクト。
+    /// The per-project history (daemon sessions + saved checkpoints)
+    /// fills every remaining pixel. Codex と同様に、履歴の最上位はプロジェクト。
     private func projectZone(compact: Bool) -> some View {
         let allEntries = RelaySessionCatalog.historyEntries(
             tasks: relay.tasks,
@@ -507,11 +610,7 @@ struct ContentView: View {
                 Spacer()
                     .frame(width: 10)
             }
-
-            currentProjectCard(compact: compact)
-                .padding(.horizontal, 10)
-                .padding(.top, 2)
-                .padding(.bottom, compact ? 6 : 9)
+            .padding(.top, compact ? 3 : 6)
 
             if projects.isEmpty {
                 Text(copy.text("No project history yet."))
@@ -810,44 +909,11 @@ struct ContentView: View {
 
     private func sidebarContent(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 8) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .firstTextBaseline, spacing: 9) {
-                        Text(">")
-                            .font(.system(size: 19, weight: .bold, design: .monospaced))
-                            .foregroundStyle(RelayPalette.signal)
-                        Text("RELAY_")
-                            .font(.system(size: 20, weight: .bold, design: .monospaced))
-                            .tracking(-0.2)
-                    }
-                    daemonBadge
-                }
-                Spacer()
-                Button {
-                    toggleSidebar()
-                } label: {
-                    Image(systemName: "sidebar.left")
-                        .frame(width: 12, height: 12)
-                }
-                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                .keyboardShortcut("\\", modifiers: .command)
-                .help(copy.text("Collapse sidebar"))
-                Button {
-                    openSettings()
-                } label: {
-                    Image(systemName: "gearshape")
-                        .frame(width: 12, height: 12)
-                }
-                .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.muted))
-                .help(copy.text("Open Relay settings"))
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, compact ? 22 : 38)
-            .padding(.bottom, compact ? 8 : 14)
+            headerCircuit(compact: compact)
 
             approvalsBanner
                 .padding(.horizontal, 10)
-                .padding(.bottom, 8)
+                .padding(.top, 8)
 
             projectZone(compact: compact)
 
@@ -1083,6 +1149,12 @@ struct ContentView: View {
                         openTerminal(agent: agent)
                     }
                 }
+                PairChip(
+                    label: copy.text("PAIR"),
+                    help: copy.text("Open Claude and Codex for this project")
+                ) {
+                    openProjectPair()
+                }
             }
             .padding(.horizontal, 10)
             .padding(.top, 2)
@@ -1093,79 +1165,85 @@ struct ContentView: View {
         }
     }
 
-    /// The working project, pinned above its history: every new window,
-    /// dialogue, compare and chain opens here. Click to switch, PAIR to
-    /// open Claude + Codex side by side.
+    /// The working project — the terminus of the header trace: every new
+    /// window, dialogue, compare and chain lands here. Click to switch.
+    ///
+    /// Label rendering relies on `.menuStyle(.button)` + plain button
+    /// style: macOS borderless menu buttons flatten custom labels to
+    /// icon+title, which silently dropped the node, path and layout.
     private func currentProjectCard(compact: Bool) -> some View {
-        HStack(spacing: 8) {
-            Menu {
-                Section(copy.text("RECENT PROJECTS")) {
-                    ForEach(relay.recentWorkingDirectories, id: \.self) { path in
-                        Button {
-                            activateProjectDirectory(path)
-                        } label: {
-                            if path == relay.defaultWorkingDirectory {
-                                Label(projectMenuLabel(path), systemImage: "checkmark")
-                            } else {
-                                Text(projectMenuLabel(path))
-                            }
+        Menu {
+            Section(copy.text("RECENT PROJECTS")) {
+                ForEach(relay.recentWorkingDirectories, id: \.self) { path in
+                    Button {
+                        activateProjectDirectory(path)
+                    } label: {
+                        if path == relay.defaultWorkingDirectory {
+                            Label(projectMenuLabel(path), systemImage: "checkmark")
+                        } else {
+                            Text(projectMenuLabel(path))
                         }
                     }
                 }
-                Divider()
-                Button(copy.text("Choose project folder…")) {
-                    chooseDirectory()
-                }
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(RelayPalette.signal)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(projectName(relay.defaultWorkingDirectory))
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundStyle(RelayPalette.text)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(RelayPalette.muted)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(RelayPalette.signal)
-                }
-                .padding(.leading, 10)
-                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .help("\(copy.text("Switch project")) · \(copy.text("New windows use this project"))")
-            .accessibilityLabel(copy.text("Switch project"))
-
-            Button {
-                openProjectPair()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "rectangle.split.2x1")
-                    Text(copy.text("PAIR"))
-                }
-                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            Divider()
+            Button(copy.text("Choose project folder…")) {
+                chooseDirectory()
             }
-            .buttonStyle(ConsoleButtonStyle(tint: RelayPalette.signal))
-            .help(copy.text("Open Claude and Codex for this project"))
-            .accessibilityLabel(copy.text("Open Claude and Codex for this project"))
-            .padding(.trailing, 8)
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .stroke(RelayPalette.signal.opacity(0.38), lineWidth: 1.5)
+                        .frame(width: 12, height: 12)
+                    Circle()
+                        .fill(RelayPalette.signal)
+                        .frame(width: 5.5, height: 5.5)
+                }
+                .frame(width: 16)
+                .scaleEffect(projectNodePulsing ? 1.3 : 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(projectName(relay.defaultWorkingDirectory))
+                        .font(.system(size: 15, weight: .bold, design: .monospaced))
+                        .foregroundStyle(RelayPalette.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(abbreviatedProjectPath(relay.defaultWorkingDirectory))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(RelayPalette.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(RelayPalette.signal)
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 10)
+            .padding(.vertical, compact ? 8 : 11)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, compact ? 7 : 10)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .help("\(copy.text("Switch project")) · \(copy.text("New windows use this project"))")
+        .accessibilityLabel(copy.text("Switch project"))
         .background(RelayPalette.signal.opacity(0.055))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(RelayPalette.signal.opacity(0.20), lineWidth: 1)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.13),
+                            RelayPalette.signal.opacity(0.20),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
         }
     }
 
@@ -1482,23 +1560,6 @@ struct ContentView: View {
         .padding(.horizontal, 8)
         .padding(.top, 5)
         .help(group.cwd)
-    }
-
-    private var daemonBadge: some View {
-        HStack(spacing: 7) {
-            StatusDot(
-                color: relay.daemonState == .online ? RelayPalette.success : RelayPalette.warning,
-                live: relay.daemonState == .connecting
-            )
-            Text("DAEMON \(copy.daemonState(relay.daemonState))")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(relay.daemonState == .online ? RelayPalette.success : RelayPalette.warning)
-            if let version = relay.daemonVersion {
-                Text("v\(version)")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(RelayPalette.muted)
-            }
-        }
     }
 
     private var workspace: some View {
@@ -2263,6 +2324,58 @@ struct LinkActionButtonStyle: ButtonStyle {
                 .animation(.easeOut(duration: 0.12), value: hovering)
                 .onHover { hovering = $0 }
         }
+    }
+}
+
+/// The dock's combo action, styled like an agent chip: opens Claude +
+/// Codex side by side for the current project.
+private struct PairChip: View {
+    let label: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(RelayPalette.signal.opacity(0.15))
+                    .frame(width: 20, height: 20)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(RelayPalette.signal.opacity(0.45), lineWidth: 1)
+                    }
+                    .overlay {
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundStyle(RelayPalette.signal)
+                    }
+                Text(label)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(RelayPalette.signal)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                hovering
+                    ? RelayPalette.signal.opacity(0.13)
+                    : RelayPalette.signal.opacity(0.06)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(RelayPalette.signal.opacity(hovering ? 0.45 : 0.25), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+            .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
