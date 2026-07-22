@@ -26,7 +26,7 @@ html{scroll-behavior:smooth}
 @media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 body{
   background:var(--canvas); color:var(--text);
-  font-family:var(--sans); font-size:16px; line-height:1.8;
+  font-family:var(--sans); font-size:1rem; line-height:1.8;
   -webkit-font-smoothing:antialiased;
 }
 ::selection{background:rgba(89,166,255,.3)}
@@ -45,17 +45,22 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--codex); outline-off
 .top .brand .gt{color:var(--codex)}
 .top .ver{font-size:11px; color:var(--muted)}
 .top .sp{flex:1}
-.top a.gh{font-size:12px; font-weight:700; color:var(--muted)}
+.top a.gh{
+  font-size:12px; font-weight:700; color:var(--muted);
+  padding:6px 10px; margin:-6px -10px; border-radius:6px;
+  transition:color .15s ease-out, transform .1s ease-out;
+}
 .top a.gh:hover{color:var(--codex); text-decoration:none}
+.top a.gh:active{transform:scale(.96)}
 
 /* ── HERO 文字区 ──────────────────────────────── */
 .hero{max-width:1020px; margin:0 auto; padding:84px 24px 0}
 h1{
-  font-size:clamp(31px,5.4vw,52px); line-height:1.3; font-weight:800;
-  letter-spacing:.01em; max-width:820px;
+  font-size:clamp(1.95rem,5.4vw,3.25rem); line-height:1.26; font-weight:800;
+  letter-spacing:-.012em; max-width:820px;
 }
 h1 .quiet{color:var(--muted); font-weight:700}
-.hero .sub{margin-top:24px; font-size:16.5px; color:var(--muted); max-width:660px}
+.hero .sub{margin-top:24px; font-size:1.03rem; color:var(--muted); max-width:660px}
 .hero .sub strong{color:var(--text); font-weight:600}
 .hero .sub .ret{
   font-family:var(--mono); font-size:14px; color:var(--text);
@@ -66,11 +71,15 @@ h1 .quiet{color:var(--muted); font-weight:700}
 .cbtn{
   font-family:var(--mono); font-weight:700; font-size:13px; letter-spacing:.05em;
   padding:11px 20px; border-radius:8px; display:inline-block;
+  transition:background .15s ease-out, color .15s ease-out,
+             border-color .15s ease-out, transform .1s ease-out;
 }
+.cbtn:active{transform:scale(.97)}
 .cbtn.blue{color:var(--codex); background:rgba(89,166,255,.1); border:1px solid rgba(89,166,255,.4)}
 .cbtn.blue:hover{background:rgba(89,166,255,.2); text-decoration:none}
 .cbtn.dim{color:var(--muted); background:rgba(255,255,255,.04); border:1px solid var(--line)}
 .cbtn.dim:hover{color:var(--text); text-decoration:none}
+@media (prefers-reduced-motion:reduce){.cbtn:active{transform:none}}
 
 /* ── 画布与窗口 ───────────────────────────────── */
 .board{max-width:1020px; margin:0 auto; padding:72px 24px 40px; position:relative}
@@ -79,10 +88,15 @@ h1 .quiet{color:var(--muted); font-weight:700}
   background:var(--win); border:1px solid var(--line);
   border-top-color:rgba(255,255,255,.14);
   border-radius:11px; overflow:hidden;
-  box-shadow:0 22px 60px rgba(0,0,0,.5);
+  box-shadow:0 16px 44px rgba(0,0,0,.42);
   max-width:800px; margin:0 auto;
+  scroll-margin-top:24px;
 }
-.win.wide{max-width:920px}
+.win.wide{
+  max-width:920px;
+  border-top-color:rgba(255,255,255,.2);
+  box-shadow:0 30px 84px rgba(0,0,0,.58);
+}
 .win.off-l{margin-left:0}
 .win.off-r{margin-right:0}
 .tbar{
@@ -101,12 +115,12 @@ h1 .quiet{color:var(--muted); font-weight:700}
 .tbar .sp{flex:1}
 .tbar .wc{color:rgba(255,255,255,.25); font-size:11px; letter-spacing:3px}
 .wbody{padding:26px 28px 28px}
-.wbody h2{font-size:23px; font-weight:700; line-height:1.45; margin-bottom:12px; letter-spacing:.01em}
-.wbody p{color:var(--muted); font-size:14.5px; max-width:640px}
+.wbody h2{font-size:1.44rem; font-weight:700; line-height:1.4; margin-bottom:12px; letter-spacing:-.006em}
+.wbody p{color:var(--muted); font-size:.91rem; max-width:640px}
 .wbody p strong{color:var(--text); font-weight:600}
 .facts{margin-top:16px; display:grid; gap:8px}
 .facts li{
-  list-style:none; color:var(--muted); font-size:13.5px; line-height:1.75;
+  list-style:none; color:var(--muted); font-size:.85rem; line-height:1.75;
   padding-left:22px; position:relative;
 }
 .facts li::before{
@@ -124,7 +138,7 @@ h1 .quiet{color:var(--muted); font-weight:700}
 .wire i{
   position:absolute; inset:0; background:var(--acc,var(--codex));
   transform:scaleY(0); transform-origin:top;
-  transition:transform .55s cubic-bezier(.4,0,.2,1);
+  transition:transform .6s cubic-bezier(.22,1,.36,1);
 }
 .wire::after{
   content:""; position:absolute; left:50%; bottom:-3px;
@@ -150,7 +164,9 @@ h1 .quiet{color:var(--muted); font-weight:700}
   display:inline-flex; align-items:center; gap:6px;
   padding:4px 10px; border-radius:6px;
   border:1px solid var(--line); color:var(--muted);
-  transition:color .3s, border-color .3s, background .3s;
+  transition:color .3s cubic-bezier(.22,1,.36,1),
+             border-color .3s cubic-bezier(.22,1,.36,1),
+             background .3s cubic-bezier(.22,1,.36,1);
 }
 .demo .steps .st .sd{width:6px; height:6px; border-radius:50%; background:rgba(255,255,255,.18); transition:background .3s}
 .demo .steps .st.on{color:var(--sc); border-color:var(--sc); background:color-mix(in srgb, var(--sc) 9%, transparent)}
@@ -165,9 +181,15 @@ h1 .quiet{color:var(--muted); font-weight:700}
 .pane{
   flex:1; min-width:0; background:#0D0D0E; border:1px solid var(--line);
   border-radius:8px; overflow:hidden; display:flex; flex-direction:column;
-  opacity:.45; transition:opacity .4s ease, border-color .4s ease;
+  opacity:.45; transform:translateY(5px);
+  transition:opacity .45s cubic-bezier(.22,1,.36,1),
+             transform .45s cubic-bezier(.22,1,.36,1),
+             border-color .45s cubic-bezier(.22,1,.36,1);
 }
-.pane.on{opacity:1; border-color:color-mix(in srgb, var(--pc) 45%, transparent)}
+.pane.on{opacity:1; transform:none; border-color:color-mix(in srgb, var(--pc) 45%, transparent)}
+@media (prefers-reduced-motion:reduce){
+  .pane{transform:none; transition:opacity .25s ease, border-color .25s ease}
+}
 .pane .ph{
   display:flex; align-items:center; gap:7px; padding:7px 11px;
   border-bottom:1px solid var(--line);
@@ -193,9 +215,13 @@ h1 .quiet{color:var(--muted); font-weight:700}
 @keyframes blink{to{visibility:hidden}}
 .demo .replay{
   all:unset; cursor:pointer; font-family:var(--mono); font-size:12px; font-weight:700;
-  color:var(--muted); padding:2px 8px; border-radius:5px;
+  color:var(--muted); padding:6px 10px; margin:-5px 0; border-radius:6px;
+  transition:color .15s ease-out, background .15s ease-out, transform .1s ease-out;
 }
 .demo .replay:hover{color:var(--codex); background:rgba(89,166,255,.1)}
+.demo .replay:active{transform:scale(.95)}
+.demo .replay:focus-visible{outline:2px solid var(--codex); outline-offset:2px}
+@media (prefers-reduced-motion:reduce){.demo .replay:active{transform:none}}
 .demo .foot{
   font-family:var(--mono); font-size:10.5px; color:var(--muted);
   padding:0 18px 14px; letter-spacing:.04em; min-height:30px;
@@ -279,6 +305,15 @@ footer{
 footer .sp{flex:1}
 footer a{color:var(--muted); text-decoration:underline}
 footer a:hover{color:var(--codex)}
+
+.pairrow{scroll-margin-top:24px}
+
+/* 高对比与低透明偏好：描边加实、辅文提亮 */
+@media (prefers-contrast:more){
+  :root{--line:rgba(255,255,255,.22); --muted:#C2C2C8}
+  .win{border-color:rgba(255,255,255,.3); box-shadow:none}
+  .tbar .wc,.tbar .grip{color:rgba(255,255,255,.5)}
+}
 
 @media (max-width:820px){
   .hero{padding-top:60px}
