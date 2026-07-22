@@ -4253,11 +4253,11 @@ struct RelayTerminalWorkspace: View {
             case .terminal(let session):
                 return ("▣", session.exited ? RelayPalette.danger : session.accent, session.agentName)
             case .dialogue:
-                return ("⇄", RelayPalette.mix, copy.text("Dialogue"))
+                return ("⇄", RelayPalette.mix, copy.text("Meeting"))
             case .compare:
-                return ("⋈", RelayPalette.signal, copy.text("COMPARE"))
+                return ("⋈", RelayPalette.signal, copy.text("PARALLEL"))
             case .chain:
-                return ("›", RelayPalette.warning, copy.text("CHAIN"))
+                return ("›", RelayPalette.warning, copy.text("TEAMWORK"))
             case .thread(let run):
                 return ("•", RelayPalette.signal, run.task?.displayTitle ?? copy.text("Thread"))
             case .approvals:

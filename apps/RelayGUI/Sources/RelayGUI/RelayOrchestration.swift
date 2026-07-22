@@ -824,7 +824,7 @@ struct RelayCompareWindow: View {
 
     private var headerTitle: String {
         if case .setup = run.phase {
-            return copy.text("COMPARE")
+            return copy.text("PARALLEL")
         }
         return run.members.map(\.agentName).joined(separator: " · ")
     }
@@ -863,7 +863,7 @@ struct RelayCompareWindow: View {
                 Button(copy.text("FORK TO TERMINALS")) {
                     store.beginContextRelay(
                         results: run.resultSnapshots(),
-                        sourceName: copy.text("COMPARE"),
+                        sourceName: copy.text("PARALLEL"),
                         sourceWindowID: run.id
                     )
                 }
@@ -1334,7 +1334,7 @@ struct RelayChainWindow: View {
 
     private var headerTitle: String {
         if case .setup = run.phase {
-            return copy.text("CHAIN")
+            return copy.text("TEAMWORK")
         }
         return run.sequence.map { agentName($0) }.joined(separator: " › ")
     }
@@ -1654,7 +1654,7 @@ struct CompareSidebarRow: View {
             glyph: "⋈",
             tint: RelayPalette.signal,
             title: run.members.isEmpty
-                ? copy.text("COMPARE")
+                ? copy.text("PARALLEL")
                 : run.members.map(\.agentName).joined(separator: " · "),
             subtitle: run.statusLabel(copy: copy),
             focused: focused,
@@ -1682,7 +1682,7 @@ struct ChainSidebarRow: View {
             glyph: "›",
             tint: RelayPalette.warning,
             title: run.sequence.isEmpty
-                ? copy.text("CHAIN")
+                ? copy.text("TEAMWORK")
                 : run.sequence
                     .map { id in agents.first { $0.id == id }?.name ?? id }
                     .joined(separator: " › "),

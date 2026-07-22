@@ -366,7 +366,7 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--amber)"></span>
-      <span class="wt" style="color:var(--amber)" data-i18n="demo.wt">串联</span>
+      <span class="wt" style="color:var(--amber)" data-i18n="demo.wt">分工合作</span>
       <span class="badge">⧉ relay-workbench</span>
       <span class="sp"></span>
       <button class="replay" id="replay" data-i18n="demo.replay">↺ 重放</button>
@@ -426,7 +426,7 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--mix)"></span>
-      <span class="wt" style="color:var(--mix)" data-i18n="d.wt">对话</span>
+      <span class="wt" style="color:var(--mix)" data-i18n="d.wt">会议</span>
       <span class="badge" data-i18n="d.badge">圆桌 · 4 席</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
@@ -452,7 +452,7 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--codex)"></span>
-      <span class="wt" style="color:var(--codex)" data-i18n="c.wt">对比</span>
+      <span class="wt" style="color:var(--codex)" data-i18n="c.wt">并行</span>
       <span class="badge" data-i18n="c.badge">worktree 隔离</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
@@ -595,7 +595,7 @@ ditto dist/Relay.app ~/Applications/</pre>
       "sub": "Relay embeds the <strong>real terminals</strong> of Claude Code, Codex, Grok and Ollama side by side on one canvas — they answer in parallel, relay in sequence, hold roundtables and judge each other. Everything stays on your Mac, and <span class=\"ret\">return</span> is always yours to press.",
       "cta1": "Source on GitHub",
       "cta2": "Build locally ↓",
-      "demo.wt": "CHAIN", "demo.replay": "↺ Replay",
+      "demo.wt": "TEAMWORK", "demo.replay": "↺ Replay",
       "demo.judge": "⚡ JUDGE", "demo.judge2": "⚡ JUDGE",
       "demo.tag2": "step 2 · received step 1", "demo.tag3": "daemon judge",
       "t.wt": "TERMINAL", "t.badge": "⧉ your project",
@@ -604,12 +604,12 @@ ditto dist/Relay.app ~/Applications/</pre>
       "t.f1": "<strong>Output radar</strong> — the moment a terminal produces output its title bar lights up; Relay watches the byte stream only, never parses or stores it",
       "t.f2": "<strong>Review queue</strong> — background output leaves a marker; ⌥⌘J walks you through oldest-first, ⌥⌘K takes you straight back",
       "t.f3": "<strong>Desk memory</strong> — after a restart you get a thumbnail first; restore or forget is your call, and no CLI ever starts on its own",
-      "d.wt": "DIALOGUE", "d.badge": "roundtable · 4 seats",
+      "d.wt": "MEETING", "d.badge": "roundtable · 4 seats",
       "d.h2": "Put them at a roundtable",
       "d.p": "Pick 2–4 agents and a topic; Relay drives the conversation seat by seat. Each keeps its own session memory, and every speaker receives a signed digest of what the others said. Cut in as the <strong>moderator</strong> anytime, and export the minutes as Markdown when the meeting ends.",
       "d.s1": "· for", "d.s2": "· against", "d.s3": "· reviewer",
       "d.s4": "You <small>· moderator</small>",
-      "c.wt": "COMPARE", "c.badge": "worktree isolation",
+      "c.wt": "PARALLEL", "c.badge": "worktree isolation",
       "c.h2": "Same task, separate copies, adopt the best",
       "c.p": "One prompt goes to several agents in parallel. With worktree isolation each works in its own copy of the repo, and the changes roll up into a <strong>file × hunk</strong> board — merge exactly the hunks you want instead of swallowing a whole version.",
       "c.v1": "CLAUDE'S VERSION", "c.v2": "CODEX'S VERSION",
@@ -644,7 +644,7 @@ ditto dist/Relay.app ~/Applications/</pre>
       "sub": "Relay は Claude Code・Codex・Grok・Ollama の<strong>本物のターミナル</strong>を 1 枚のキャンバスに並べて埋め込みます。同時に答えさせ、順番にリレーさせ、円卓で議論させ、互いに判定させる——すべてあなたの Mac の中だけで動き、<span class=\"ret\">return</span> を押すのはいつもあなたです。",
       "cta1": "GitHub で見る",
       "cta2": "ローカルでビルド ↓",
-      "demo.wt": "チェーン", "demo.replay": "↺ もう一度",
+      "demo.wt": "分業", "demo.replay": "↺ もう一度",
       "demo.judge": "⚡ 判定", "demo.judge2": "⚡ 判定",
       "demo.tag2": "step 2 · 前段を受信", "demo.tag3": "daemon 判定役",
       "t.wt": "ターミナル", "t.badge": "⧉ あなたのプロジェクト",
@@ -653,12 +653,12 @@ ditto dist/Relay.app ~/Applications/</pre>
       "t.f1": "<strong>出力レーダー</strong>——どの端末が出力中かはタイトルバーの波形ですぐ分かる。Relay はバイト列を見るだけで、解析も保存もしない",
       "t.f2": "<strong>未読キュー</strong>——バックグラウンドの出力はマークとして残る。⌥⌘J で古い順に巡回、⌥⌘K で元の場所へ",
       "t.f3": "<strong>デスクメモリ</strong>——再起動後はまずサムネイル。復元するか忘れるかはあなたが決める。CLI が勝手に起動することはない",
-      "d.wt": "対話", "d.badge": "円卓 · 4 席",
+      "d.wt": "会議", "d.badge": "円卓 · 4 席",
       "d.h2": "円卓会議をさせよう",
       "d.p": "エージェントを 2〜4 体と議題を選ぶと、Relay が席順に会話を回します。各自が独立したセッション記憶を持ち、発言前には他の発言の署名付きサマリーを受け取ります。いつでも<strong>司会</strong>として割り込め、散会後は議事録を Markdown で書き出せます。",
       "d.s1": "· 賛成", "d.s2": "· 反対", "d.s3": "· レビュアー",
       "d.s4": "あなた <small>· 司会</small>",
-      "c.wt": "比較", "c.badge": "worktree 分離",
+      "c.wt": "並列", "c.badge": "worktree 分離",
       "c.h2": "同じ課題を別々に解かせ、良い方を採る",
       "c.p": "1 つのプロンプトを複数のエージェントに並列で送ります。worktree 分離では各自がリポジトリの独立コピーで作業し、変更は<strong>ファイル × ハンク</strong>のボードに集約。バージョンを丸ごとではなく、欲しいハンクだけを選んで取り込めます。",
       "c.v1": "CLAUDE の版", "c.v2": "CODEX の版",

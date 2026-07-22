@@ -182,8 +182,8 @@ struct RelaySessionLibraryDeck: View {
     private var kindChips: some View {
         HStack(spacing: 6) {
             kindChip(nil, label: copy.text("ALL"))
-            kindChip(.compare, label: "⋈ \(copy.text("COMPARE"))")
-            kindChip(.chain, label: "› \(copy.text("CHAIN"))")
+            kindChip(.compare, label: "⋈ \(copy.text("PARALLEL"))")
+            kindChip(.chain, label: "› \(copy.text("TEAMWORK"))")
             kindChip(.single, label: "• \(copy.text("SINGLE TASKS"))")
             Spacer()
         }

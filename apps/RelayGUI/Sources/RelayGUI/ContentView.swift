@@ -451,15 +451,15 @@ struct ContentView: View {
     private var linkActions: some View {
         HStack(spacing: 6) {
             linkButton(
-                glyph: "⇄", label: copy.text("Dialogue"), tint: RelayPalette.mix,
-                helpKey: "Open a dialogue between two agents"
+                glyph: "⇄", label: copy.text("Meeting"), tint: RelayPalette.mix,
+                helpKey: "Open a meeting between two agents"
             ) { openDialogue() }
             linkButton(
-                glyph: "⋈", label: copy.text("COMPARE"), tint: RelayPalette.signal,
+                glyph: "⋈", label: copy.text("PARALLEL"), tint: RelayPalette.signal,
                 helpKey: "Send one prompt to several agents"
             ) { openCompare() }
             linkButton(
-                glyph: "›", label: copy.text("CHAIN"), tint: RelayPalette.warning,
+                glyph: "›", label: copy.text("TEAMWORK"), tint: RelayPalette.warning,
                 helpKey: "Relay the answer through steps"
             ) { openChain() }
         }
@@ -1364,7 +1364,7 @@ struct ContentView: View {
 
     private var agentModeBar: some View {
         HStack(spacing: 6) {
-            Button(copy.text("COMPARE")) {
+            Button(copy.text("PARALLEL")) {
                 relay.toggleCompareMode()
                 promptFocused = true
             }
@@ -1373,7 +1373,7 @@ struct ContentView: View {
             ))
             .help(copy.text("Send one task to several agents in parallel"))
 
-            Button(copy.text("CHAIN")) {
+            Button(copy.text("TEAMWORK")) {
                 relay.toggleChainMode()
                 promptFocused = true
             }
@@ -2466,7 +2466,7 @@ private struct AgentChip: View {
                 action()
             }
             if let onStartDialogue {
-                Button(copy.text("Start a dialogue with this agent")) {
+                Button(copy.text("Start a meeting with this agent")) {
                     onStartDialogue()
                 }
                 .disabled(!agent.isAvailable)

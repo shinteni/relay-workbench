@@ -455,7 +455,7 @@ struct RelayDialogueWindow: View {
 
     private var headerTitle: String {
         if case .setup = run.phase {
-            return copy.text("Dialogue")
+            return copy.text("Meeting")
         }
         return run.participants.map { agentName($0) }.joined(separator: " ⇄ ")
     }
@@ -498,7 +498,7 @@ struct RelayDialogueWindow: View {
                 Button(copy.text("FORK TO TERMINALS")) {
                     store.beginContextRelay(
                         results: run.resultSnapshots(),
-                        sourceName: copy.text("Dialogue"),
+                        sourceName: copy.text("Meeting"),
                         sourceWindowID: run.id
                     )
                 }
@@ -806,7 +806,7 @@ struct RelayDialogueSidebarRow: View {
 
     private var title: String {
         if case .setup = run.phase {
-            return copy.text("Dialogue")
+            return copy.text("Meeting")
         }
         return run.participants.map { agentName($0) }.joined(separator: " ⇄ ")
     }

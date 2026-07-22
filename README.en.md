@@ -22,7 +22,7 @@ UI in 简体中文 / 日本語 / English · SwiftUI GUI + Rust daemon · Test ba
 | | |
 |---|---|
 | **Real terminals** | Each CLI's **native TUI** is embedded, not imitated: drag, eight-way resize, edge snapping, one-click tiling, PAIR to open Claude + Codex together; output radar, review queue and a cross-CLI attention router |
-| **Five ways to link** | ⇄ roundtable dialogue · ⋈ parallel compare · › sequential chain · ⚡ verdict · ⑂ context fork |
+| **Five ways to link** | ⇄ meeting (roundtable) · ⋈ parallel · › teamwork (sequential relay) · ⚡ verdict · ⑂ context fork |
 | **Decision chain** | Freeze screens → judge (you press return) → seal → private checkpoint (with git baseline) → lineage navigation and drift checks; every step explicit, all evidence read-only |
 | **Local first** | No account, no telemetry, no cloud; screen snapshots live in process memory only, checkpoints land on disk as `0700/0600`, embedded terminal PTY content is never recorded |
 | **Open adapters** | Line-based CLIs plug in through a `generic` manifest, ACP speakers through `acp` — zero code either way |
