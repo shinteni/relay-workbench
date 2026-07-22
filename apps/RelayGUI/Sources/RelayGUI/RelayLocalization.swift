@@ -3,6 +3,7 @@ import SwiftUI
 enum RelayLanguage: String, CaseIterable, Identifiable {
     case chinese = "zh-Hans"
     case japanese = "ja"
+    case english = "en"
 
     static let defaultsKey = "interfaceLanguage"
 
@@ -12,6 +13,7 @@ enum RelayLanguage: String, CaseIterable, Identifiable {
         switch self {
         case .chinese: "简体中文"
         case .japanese: "日本語"
+        case .english: "English"
         }
     }
 
@@ -31,9 +33,13 @@ enum RelayLanguage: String, CaseIterable, Identifiable {
 struct RelayCopy {
     let language: RelayLanguage
 
+    /// Keys are the English source copy, so English is the identity table.
     func text(_ key: String) -> String {
-        let table = language == .chinese ? Self.chinese : Self.japanese
-        return table[key] ?? key
+        switch language {
+        case .chinese: Self.chinese[key] ?? key
+        case .japanese: Self.japanese[key] ?? key
+        case .english: key
+        }
     }
 
     func taskStatus(_ status: RelayTaskStatus) -> String {
@@ -54,6 +60,14 @@ struct RelayCopy {
         case (.japanese, .completed): "完了"
         case (.japanese, .failed): "失敗"
         case (.japanese, .canceled): "キャンセル済み"
+        case (.english, .queued): "Queued"
+        case (.english, .starting): "Starting"
+        case (.english, .running): "Running"
+        case (.english, .waitingForApproval): "Awaiting approval"
+        case (.english, .waitingForInput): "Awaiting input"
+        case (.english, .completed): "Completed"
+        case (.english, .failed): "Failed"
+        case (.english, .canceled): "Canceled"
         }
     }
 
@@ -65,6 +79,9 @@ struct RelayCopy {
         case (.japanese, .connecting): "接続中"
         case (.japanese, .online): "オンライン"
         case (.japanese, .offline): "オフライン"
+        case (.english, .connecting): "CONNECTING"
+        case (.english, .online): "ONLINE"
+        case (.english, .offline): "OFFLINE"
         }
     }
 
@@ -78,6 +95,10 @@ struct RelayCopy {
         case (.japanese, .ready): "使用可能"
         case (.japanese, .missing): "未検出"
         case (.japanese, .invalid): "無効"
+        case (.english, .checking): "CHECKING"
+        case (.english, .ready): "READY"
+        case (.english, .missing): "MISSING"
+        case (.english, .invalid): "INVALID"
         }
     }
 
@@ -93,6 +114,11 @@ struct RelayCopy {
         case (.japanese, .waiting): "待機中"
         case (.japanese, .failed): "失敗"
         case (.japanese, .done): "終了"
+        case (.english, .all): "All"
+        case (.english, .active): "Active"
+        case (.english, .waiting): "Waiting"
+        case (.english, .failed): "Failed"
+        case (.english, .done): "Done"
         }
     }
 
@@ -108,6 +134,11 @@ struct RelayCopy {
         case (.japanese, .tool): "ツール"
         case (.japanese, .system): "システム"
         case (.japanese, .error): "エラー"
+        case (.english, .user): "You"
+        case (.english, .assistant): "Agent"
+        case (.english, .tool): "Tool"
+        case (.english, .system): "System"
+        case (.english, .error): "Error"
         }
     }
 
@@ -117,31 +148,39 @@ struct RelayCopy {
         case (.chinese, .plan): "计划"
         case (.japanese, .defaultMode): "デフォルト"
         case (.japanese, .plan): "計画"
+        case (.english, .defaultMode): "Default"
+        case (.english, .plan): "Plan"
         }
     }
 
     func chainPlaceholder(count: Int) -> String {
-        if count >= 2 {
-            return language == .chinese
-                ? "发送给 \(count) 个接力步骤的任务…"
-                : "\(count) ステップのチェーンに送るタスク…"
+        guard count >= 2 else {
+            return text("Click at least two agents to build a chain…")
         }
-        return text("Click at least two agents to build a chain…")
+        switch language {
+        case .chinese: return "发送给 \(count) 个接力步骤的任务…"
+        case .japanese: return "\(count) ステップのチェーンに送るタスク…"
+        case .english: return "Task to send through \(count) relay steps…"
+        }
     }
 
     func comparePlaceholder(count: Int) -> String {
-        if count >= 2 {
-            return language == .chinese
-                ? "并行发送给 \(count) 个智能体的任务…"
-                : "\(count) 個のエージェントへ並列送信するタスク…"
+        guard count >= 2 else {
+            return text("Check at least two agents to compare…")
         }
-        return text("Check at least two agents to compare…")
+        switch language {
+        case .chinese: return "并行发送给 \(count) 个智能体的任务…"
+        case .japanese: return "\(count) 個のエージェントへ並列送信するタスク…"
+        case .english: return "Task to send to \(count) agents in parallel…"
+        }
     }
 
     func taskPlaceholder(agentName: String) -> String {
-        language == .chinese
-            ? "描述一个交给 \(agentName) 的任务…"
-            : "\(agentName) に依頼するタスクを入力…"
+        switch language {
+        case .chinese: "描述一个交给 \(agentName) 的任务…"
+        case .japanese: "\(agentName) に依頼するタスクを入力…"
+        case .english: "Describe a task for \(agentName)…"
+        }
     }
 
     private static let chinese: [String: String] = [

@@ -152,8 +152,9 @@ struct SettingsView: View {
                 description: copy.text("Changes the language used by Relay. CLI output and agent replies stay unchanged.")
             ) {
                 HStack(spacing: 6) {
-                    languageButton(.chinese, key: "Chinese")
-                    languageButton(.japanese, key: "Japanese")
+                    ForEach(RelayLanguage.allCases) { language in
+                        languageButton(language)
+                    }
                 }
             }
 
@@ -623,8 +624,8 @@ struct SettingsView: View {
         .padding(.vertical, 22)
     }
 
-    private func languageButton(_ language: RelayLanguage, key: String) -> some View {
-        Button(copy.text(key)) { relay.setLanguage(language) }
+    private func languageButton(_ language: RelayLanguage) -> some View {
+        Button(language.nativeName) { relay.setLanguage(language) }
             .buttonStyle(SettingsChoiceButtonStyle(selected: relay.language == language))
     }
 

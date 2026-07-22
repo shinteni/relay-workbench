@@ -13,6 +13,28 @@ struct RelayLocalizationTests {
         #expect(RelayLanguage.load(from: defaults) == .chinese)
         RelayLanguage.japanese.save(to: defaults)
         #expect(RelayLanguage.load(from: defaults) == .japanese)
+        RelayLanguage.english.save(to: defaults)
+        #expect(RelayLanguage.load(from: defaults) == .english)
+    }
+
+    @Test("English is the identity table over the key strings")
+    func englishPassthroughAndFormatters() {
+        let english = RelayCopy(language: .english)
+
+        #expect(english.text("Settings") == "Settings")
+        #expect(english.text("PROJECTS") == "PROJECTS")
+        #expect(english.text("Open Claude and Codex for this project")
+            == "Open Claude and Codex for this project")
+        #expect(english.taskStatus(.waitingForInput) == "Awaiting input")
+        #expect(english.daemonState(.online) == "ONLINE")
+        #expect(english.agentHealth(.ready) == "READY")
+        #expect(english.threadFilter(.active) == "Active")
+        #expect(english.outputKind(.assistant) == "Agent")
+        #expect(english.codexMode(.plan) == "Plan")
+        #expect(english.chainPlaceholder(count: 3) == "Task to send through 3 relay steps…")
+        #expect(english.comparePlaceholder(count: 2) == "Task to send to 2 agents in parallel…")
+        #expect(english.taskPlaceholder(agentName: "Claude") == "Describe a task for Claude…")
+        #expect(RelayLanguage.english.nativeName == "English")
     }
 
     @Test("provides Chinese and Japanese interface copy")

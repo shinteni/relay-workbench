@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Relay 串联器 — 本地多 CLI 智能体工作台</title>
-<meta name="description" content="面向 macOS 的本地多 CLI 智能体工作台：Claude Code、Codex、Grok、Ollama 的真实 TUI 并排嵌入，同时发送、顺序接力、圆桌对话、结果裁决与私有决策链——全部只发生在你的 Mac 上。">
+<meta name="description" content="面向 macOS 的本地多 CLI 智能体工作台：Claude Code、Codex、Grok、Ollama 的真实 TUI 并排嵌入，同时发送、顺序接力、圆桌对话、结果裁决与私有决策链——全部只发生在你的 Mac 上。Local multi-CLI agent workbench for macOS.">
 <meta property="og:title" content="Relay 串联器 — 本地多 CLI 智能体工作台">
-<meta property="og:description" content="每个 AI CLI 都很强，串联起来才是工作台。真实 TUI 并排嵌入，对话 / 对比 / 接力 / 裁决，全部本地。">
+<meta property="og:description" content="每个 AI CLI 都很强，串联起来才是工作台。真实 TUI 并排嵌入，对话 / 对比 / 接力 / 裁决，全部本地。Every AI CLI is strong alone — relayed together, they're a workbench.">
 <meta property="og:type" content="website">
 <style>
 /* ── 令牌：全部来自应用 RelayPalette ───────────── */
@@ -38,13 +38,23 @@ a:focus-visible,button:focus-visible{outline:2px solid var(--codex); outline-off
 /* ── 顶行：极简，不粘、不玻璃 ─────────────────── */
 .top{
   max-width:1020px; margin:0 auto; padding:26px 24px 0;
-  display:flex; align-items:baseline; gap:14px;
+  display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
   font-family:var(--mono);
 }
-.top .brand{font-weight:700; font-size:14px; color:var(--text)}
+.top .brand{font-weight:700; font-size:14px; color:var(--text); white-space:nowrap}
 .top .brand .gt{color:var(--codex)}
 .top .ver{font-size:11px; color:var(--muted)}
 .top .sp{flex:1}
+.langs{display:flex; gap:2px; align-items:center}
+.langs button{
+  all:unset; cursor:pointer; font-family:var(--mono); font-size:11px; font-weight:700;
+  color:var(--muted); padding:5px 8px; border-radius:5px; white-space:nowrap;
+  transition:color .15s ease-out, background .15s ease-out, transform .1s ease-out;
+}
+.langs button:hover{color:var(--text)}
+.langs button:active{transform:scale(.95)}
+.langs button.on{color:var(--codex); background:rgba(89,166,255,.1)}
+.langs button:focus-visible{outline:2px solid var(--codex); outline-offset:2px}
 .top a.gh{
   font-size:12px; font-weight:700; color:var(--muted);
   padding:6px 10px; margin:-6px -10px; border-radius:6px;
@@ -277,11 +287,11 @@ h1 .quiet{color:var(--muted); font-weight:700}
   font-family:var(--mono); font-size:12.5px; line-height:2.1;
 }
 .gatecard .row{display:flex; gap:10px; align-items:baseline; flex-wrap:wrap}
-.gatecard .k{color:var(--local); font-weight:700; letter-spacing:.06em; min-width:120px}
+.gatecard .k{color:var(--local); font-weight:700; letter-spacing:.06em; min-width:150px}
 .gatecard .v{color:var(--muted)}
 
 /* ── 末排双窗 ─────────────────────────────────── */
-.pairrow{display:flex; gap:22px; align-items:stretch; max-width:920px; margin:0 auto}
+.pairrow{display:flex; gap:22px; align-items:stretch; max-width:920px; margin:0 auto; scroll-margin-top:24px}
 .pairrow .win{margin:0; flex:1; min-width:0; max-width:none}
 pre.codeblk{
   font-family:var(--mono); font-size:12.5px; line-height:2.05;
@@ -305,8 +315,6 @@ footer{
 footer .sp{flex:1}
 footer a{color:var(--muted); text-decoration:underline}
 footer a:hover{color:var(--codex)}
-
-.pairrow{scroll-margin-top:24px}
 
 /* 高对比与低透明偏好：描边加实、辅文提亮 */
 @media (prefers-contrast:more){
@@ -332,31 +340,36 @@ footer a:hover{color:var(--codex)}
 
 <div class="top">
   <span class="brand"><span class="gt">&gt; </span>RELAY_ 串联器</span>
-  <span class="ver">v0.109 · macOS</span>
+  <span class="ver">v0.110 · macOS</span>
   <span class="sp"></span>
+  <nav class="langs" aria-label="Language">
+    <button data-lang="zh" lang="zh-CN">中文</button>
+    <button data-lang="en" lang="en">EN</button>
+    <button data-lang="ja" lang="ja">日本語</button>
+  </nav>
   <a class="gh" href="https://github.com/shinteni/relay-workbench">GitHub ↗</a>
 </div>
 
 <header class="hero">
-  <h1>每个 AI CLI 都很强，<br><span class="quiet">串联起来才是工作台。</span></h1>
-  <p class="sub">Relay 把 Claude Code、Codex、Grok、Ollama 的<strong>真实终端</strong>并排嵌进一块画布，让它们同时作答、顺序接力、圆桌讨论、互相裁决——全程只在你的 Mac 上，<span class="ret">return</span> 永远由你来按。</p>
+  <h1 data-i18n="h1">每个 AI CLI 都很强，<br><span class="quiet">串联起来才是工作台。</span></h1>
+  <p class="sub" data-i18n="sub">Relay 把 Claude Code、Codex、Grok、Ollama 的<strong>真实终端</strong>并排嵌进一块画布，让它们同时作答、顺序接力、圆桌讨论、互相裁决——全程只在你的 Mac 上，<span class="ret">return</span> 永远由你来按。</p>
   <div class="cta">
-    <a class="cbtn blue" href="https://github.com/shinteni/relay-workbench">GitHub 源码</a>
-    <a class="cbtn dim" href="#install">本地构建 ↓</a>
+    <a class="cbtn blue" href="https://github.com/shinteni/relay-workbench" data-i18n="cta1">GitHub 源码</a>
+    <a class="cbtn dim" href="#install" data-i18n="cta2">本地构建 ↓</a>
   </div>
 </header>
 
 <main class="board">
 
   <!-- 串联演示窗：一次真实的链 -->
-  <section class="win wide demo" id="demo" aria-label="串联演示：提示词经 Claude、Codex 接力后由裁决收尾">
+  <section class="win wide demo" id="demo" aria-label="Chain demo">
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--amber)"></span>
-      <span class="wt" style="color:var(--amber)">串联</span>
-      <span class="badge">⧉ 串联器</span>
+      <span class="wt" style="color:var(--amber)" data-i18n="demo.wt">串联</span>
+      <span class="badge">⧉ relay-workbench</span>
       <span class="sp"></span>
-      <button class="replay" id="replay" title="重放这条链">↺ 重放</button>
+      <button class="replay" id="replay" data-i18n="demo.replay">↺ 重放</button>
       <span class="wc">− ⤢ ×</span>
     </div>
     <div class="steps" aria-hidden="true">
@@ -364,7 +377,7 @@ footer a:hover{color:var(--codex)}
       <span class="arr">›</span>
       <span class="st" id="st2" style="--sc:var(--codex)"><span class="sd"></span>CODEX</span>
       <span class="arr">›</span>
-      <span class="st" id="st3" style="--sc:var(--amber)"><span class="sd"></span>⚡ 裁决</span>
+      <span class="st" id="st3" style="--sc:var(--amber)"><span class="sd"></span><span data-i18n="demo.judge">⚡ 裁决</span></span>
     </div>
     <div class="promptline"><span class="gt">›</span><span id="ptext"></span><span class="caret" id="pcaret"></span></div>
     <div class="panes">
@@ -373,11 +386,11 @@ footer a:hover{color:var(--codex)}
         <pre id="out1"></pre>
       </div>
       <div class="pane" id="pane2" style="--pc:var(--codex)">
-        <div class="ph"><span class="pd"></span>CODEX<span class="sp"></span><span class="tag">step 2 · 收到上一步</span></div>
+        <div class="ph"><span class="pd"></span>CODEX<span class="sp"></span><span class="tag" data-i18n="demo.tag2">step 2 · 收到上一步</span></div>
         <pre id="out2"></pre>
       </div>
       <div class="pane" id="pane3" style="--pc:var(--amber)">
-        <div class="ph"><span class="pd"></span>⚡ 裁决<span class="sp"></span><span class="tag">daemon 裁判</span></div>
+        <div class="ph"><span class="pd"></span><span data-i18n="demo.judge2">⚡ 裁决</span><span class="sp"></span><span class="tag" data-i18n="demo.tag3">daemon 裁判</span></div>
         <pre id="out3"></pre>
       </div>
     </div>
@@ -391,17 +404,17 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--claude)"></span>
-      <span class="wt" style="color:var(--claude)">终端</span>
-      <span class="badge">⧉ 你的项目</span>
+      <span class="wt" style="color:var(--claude)" data-i18n="t.wt">终端</span>
+      <span class="badge" data-i18n="t.badge">⧉ 你的项目</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
     <div class="wbody">
-      <h2>嵌入的是真实 TUI，不是模拟器</h2>
-      <p>点一下侧栏芯片，那个 CLI 的<strong>原生终端</strong>就出现在画布上：拖动、八向缩放、贴边吸附半屏、推角四分屏、一键平铺；<strong>双开</strong>一次打开当前项目的 Claude + Codex。</p>
+      <h2 data-i18n="t.h2">嵌入的是真实 TUI，不是模拟器</h2>
+      <p data-i18n="t.p">点一下侧栏芯片，那个 CLI 的<strong>原生终端</strong>就出现在画布上：拖动、八向缩放、贴边吸附半屏、推角四分屏、一键平铺；<strong>双开</strong>一次打开当前项目的 Claude + Codex。</p>
       <ul class="facts">
-        <li><strong>输出雷达</strong>——谁在产出，标题栏波形立即亮起；Relay 只看字节流，不解析、不保存</li>
-        <li><strong>待看队列</strong>——后台输出沉淀成标记，⌥⌘J 按最早顺序逐个带回，⌥⌘K 原路返回</li>
-        <li><strong>桌面记忆</strong>——重启先给缩略图，恢复还是忘记由你选，绝不擅自启动 CLI</li>
+        <li data-i18n="t.f1"><strong>输出雷达</strong>——谁在产出，标题栏波形立即亮起；Relay 只看字节流，不解析、不保存</li>
+        <li data-i18n="t.f2"><strong>待看队列</strong>——后台输出沉淀成标记，⌥⌘J 按最早顺序逐个带回，⌥⌘K 原路返回</li>
+        <li data-i18n="t.f3"><strong>桌面记忆</strong>——重启先给缩略图，恢复还是忘记由你选，绝不擅自启动 CLI</li>
       </ul>
     </div>
   </section>
@@ -413,21 +426,21 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--mix)"></span>
-      <span class="wt" style="color:var(--mix)">对话</span>
-      <span class="badge">圆桌 · 4 席</span>
+      <span class="wt" style="color:var(--mix)" data-i18n="d.wt">对话</span>
+      <span class="badge" data-i18n="d.badge">圆桌 · 4 席</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
     <div class="wbody">
-      <h2>让它们开个圆桌会</h2>
-      <p>选 2–4 个智能体和一个议题，Relay 按座次驱动多轮交谈——各自保持独立会话记忆，每人开口前收到"此后各方发言"的署名摘要。你随时以<strong>主持人</strong>身份插话，散会后导出 Markdown 纪要。</p>
+      <h2 data-i18n="d.h2">让它们开个圆桌会</h2>
+      <p data-i18n="d.p">选 2–4 个智能体和一个议题，Relay 按座次驱动多轮交谈——各自保持独立会话记忆，每人开口前收到"此后各方发言"的署名摘要。你随时以<strong>主持人</strong>身份插话，散会后导出 Markdown 纪要。</p>
       <div class="seats" aria-hidden="true">
-        <span class="seat"><i style="background:var(--claude)"></i>Claude <small>· 正方</small></span>
+        <span class="seat"><i style="background:var(--claude)"></i>Claude <small data-i18n="d.s1">· 正方</small></span>
         <span class="flow">⇄</span>
-        <span class="seat"><i style="background:var(--codex)"></i>Codex <small>· 反方</small></span>
+        <span class="seat"><i style="background:var(--codex)"></i>Codex <small data-i18n="d.s2">· 反方</small></span>
         <span class="flow">⇄</span>
-        <span class="seat"><i style="background:var(--local)"></i>Ollama <small>· 评审</small></span>
+        <span class="seat"><i style="background:var(--local)"></i>Ollama <small data-i18n="d.s3">· 评审</small></span>
         <span class="flow">⇄</span>
-        <span class="seat"><i style="background:var(--mix)"></i>你 <small>· 主持人</small></span>
+        <span class="seat"><i style="background:var(--mix)"></i><span data-i18n="d.s4">你 <small>· 主持人</small></span></span>
       </div>
     </div>
   </section>
@@ -439,21 +452,21 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--codex)"></span>
-      <span class="wt" style="color:var(--codex)">对比</span>
-      <span class="badge">worktree 隔离</span>
+      <span class="wt" style="color:var(--codex)" data-i18n="c.wt">对比</span>
+      <span class="badge" data-i18n="c.badge">worktree 隔离</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
     <div class="wbody">
-      <h2>同一道题，各写各的，择优采纳</h2>
-      <p>一条提示词并行发给多个智能体。开启 worktree 隔离后各自在独立副本里改代码，改动汇成<strong>文件 × 改动块</strong>的看板——按 hunk 勾选合并，不必整版全收。</p>
+      <h2 data-i18n="c.h2">同一道题，各写各的，择优采纳</h2>
+      <p data-i18n="c.p">一条提示词并行发给多个智能体。开启 worktree 隔离后各自在独立副本里改代码，改动汇成<strong>文件 × 改动块</strong>的看板——按 hunk 勾选合并，不必整版全收。</p>
       <div class="twocol" aria-hidden="true">
         <div class="col">
-          <div class="ch" style="color:var(--claude)">CLAUDE 的版本</div>
-          <div class="cb"><span class="add">+ retry(3, backoff=exp)</span><br><span class="del">− retry(1)</span><br><span class="pick">✓ 采纳此块</span></div>
+          <div class="ch" style="color:var(--claude)" data-i18n="c.v1">CLAUDE 的版本</div>
+          <div class="cb"><span class="add">+ retry(3, backoff=exp)</span><br><span class="del">− retry(1)</span><br><span class="pick" data-i18n="c.pick1">✓ 采纳此块</span></div>
         </div>
         <div class="col">
-          <div class="ch" style="color:var(--codex)">CODEX 的版本</div>
-          <div class="cb"><span class="add">+ timeout=30s, jitter</span><br><span class="del">− timeout=5s</span><br><span class="pick">✓ 采纳此块</span></div>
+          <div class="ch" style="color:var(--codex)" data-i18n="c.v2">CODEX 的版本</div>
+          <div class="cb"><span class="add">+ timeout=30s, jitter</span><br><span class="del">− timeout=5s</span><br><span class="pick" data-i18n="c.pick2">✓ 采纳此块</span></div>
         </div>
       </div>
     </div>
@@ -466,19 +479,19 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--amber)"></span>
-      <span class="wt" style="color:var(--amber)">裁决</span>
-      <span class="badge">证据链</span>
+      <span class="wt" style="color:var(--amber)" data-i18n="j.wt">裁决</span>
+      <span class="badge" data-i18n="j.badge">证据链</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
     <div class="wbody">
-      <h2>争不出结果？交给裁判，留下证据</h2>
-      <p>把几个终端的画面<strong>冻结</strong>成对照卡片，交给另一个 CLI 或 daemon 裁判：结论 / 理由 / 把握程度结构化返回。封存后连同当时的 <strong>git 基线</strong>存成私有检查点，之后可检查代码漂移、对比派生分支——每一步显式操作，Relay 不替你按回车、不改写记录、不自动评价。</p>
-      <div class="dchain" role="img" aria-label="决策链：冻结现场 → 裁决 → 封存 → 私有检查点 → 血缘与漂移">
-        <span class="dstep">冻结现场<small>只读快照</small></span><span class="darr">→</span>
-        <span class="dstep">裁决<small>人握回车</small></span><span class="darr">→</span>
-        <span class="dstep">封存<small>显式点击</small></span><span class="darr">→</span>
-        <span class="dstep">检查点<small>git 基线</small></span><span class="darr">→</span>
-        <span class="dstep">血缘 / 漂移<small>多代对比</small></span>
+      <h2 data-i18n="j.h2">争不出结果？交给裁判，留下证据</h2>
+      <p data-i18n="j.p">把几个终端的画面<strong>冻结</strong>成对照卡片，交给另一个 CLI 或 daemon 裁判：结论 / 理由 / 把握程度结构化返回。封存后连同当时的 <strong>git 基线</strong>存成私有检查点，之后可检查代码漂移、对比派生分支——每一步显式操作，Relay 不替你按回车、不改写记录、不自动评价。</p>
+      <div class="dchain" role="img" aria-label="Decision chain">
+        <span class="dstep" data-i18n="j.d1">冻结现场<small>只读快照</small></span><span class="darr">→</span>
+        <span class="dstep" data-i18n="j.d2">裁决<small>人握回车</small></span><span class="darr">→</span>
+        <span class="dstep" data-i18n="j.d3">封存<small>显式点击</small></span><span class="darr">→</span>
+        <span class="dstep" data-i18n="j.d4">检查点<small>git 基线</small></span><span class="darr">→</span>
+        <span class="dstep" data-i18n="j.d5">血缘 / 漂移<small>多代对比</small></span>
       </div>
     </div>
   </section>
@@ -490,18 +503,18 @@ footer a:hover{color:var(--codex)}
     <div class="tbar">
       <span class="grip">⠿</span>
       <span class="dot" style="background:var(--local)"></span>
-      <span class="wt" style="color:var(--local)">审批</span>
+      <span class="wt" style="color:var(--local)" data-i18n="g.wt">审批</span>
       <span class="badge">USER GATE</span>
       <span class="sp"></span><span class="wc">− ⤢ ×</span>
     </div>
     <div class="wbody">
-      <h2>闸门和回车，都在你手里</h2>
-      <p>所有任务的工具审批汇入同一扇审批窗，处理完各流程自动继续；跨终端填入一律 bracketed paste——<strong>只填入、不执行</strong>。Relay 自身没有账号、没有遥测、没有云端。</p>
+      <h2 data-i18n="g.h2">闸门和回车，都在你手里</h2>
+      <p data-i18n="g.p">所有任务的工具审批汇入同一扇审批窗，处理完各流程自动继续；跨终端填入一律 bracketed paste——<strong>只填入、不执行</strong>。Relay 自身没有账号、没有遥测、没有云端。</p>
       <div class="gatecard">
-        <div class="row"><span class="k">终端 PTY</span><span class="v">从不记录内容，只观察是否在输出</span></div>
-        <div class="row"><span class="k">画面快照</span><span class="v">仅存进程内存，不进剪贴板、不写盘</span></div>
-        <div class="row"><span class="k">决策检查点</span><span class="v">显式保存才落盘：目录 0700 · 文件 0600 · 删除进废纸篓</span></div>
-        <div class="row"><span class="k">网络</span><span class="v">Relay 自身零远端——LOCAL ONLY</span></div>
+        <div class="row"><span class="k" data-i18n="g.k1">终端 PTY</span><span class="v" data-i18n="g.v1">从不记录内容，只观察是否在输出</span></div>
+        <div class="row"><span class="k" data-i18n="g.k2">画面快照</span><span class="v" data-i18n="g.v2">仅存进程内存，不进剪贴板、不写盘</span></div>
+        <div class="row"><span class="k" data-i18n="g.k3">决策检查点</span><span class="v" data-i18n="g.v3">显式保存才落盘：目录 0700 · 文件 0600 · 删除进废纸篓</span></div>
+        <div class="row"><span class="k" data-i18n="g.k4">网络</span><span class="v" data-i18n="g.v4">Relay 自身零远端——LOCAL ONLY</span></div>
       </div>
     </div>
   </section>
@@ -514,12 +527,12 @@ footer a:hover{color:var(--codex)}
       <div class="tbar">
         <span class="grip">⠿</span>
         <span class="dot" style="background:var(--codex)"></span>
-        <span class="wt" style="color:var(--codex)">接入</span>
-        <span class="badge">零代码 manifest</span>
+        <span class="wt" style="color:var(--codex)" data-i18n="a.wt">接入</span>
+        <span class="badge" data-i18n="a.badge">零代码 manifest</span>
         <span class="sp"></span><span class="wc">− ⤢ ×</span>
       </div>
       <div class="wbody tight">
-        <pre class="codeblk"><span class="c">// 按行输出走 generic，讲 ACP 走 acp</span>
+        <pre class="codeblk"><span class="c" data-i18n="a.c1">// 按行输出走 generic，讲 ACP 走 acp</span>
 {
   <span class="k">"id"</span>: <span class="s">"echo"</span>,
   <span class="k">"requirements"</span>: [{
@@ -531,7 +544,7 @@ footer a:hover{color:var(--codex)}
       [<span class="s">"--resume"</span>, <span class="s">"{session}"</span>]
   }
 }</pre>
-        <p class="note">一份 JSON 接入任何 CLI；声明会话参数即获得续聊。</p>
+        <p class="note" data-i18n="a.note">一份 JSON 接入任何 CLI；声明会话参数即获得续聊。</p>
       </div>
     </section>
 
@@ -539,7 +552,7 @@ footer a:hover{color:var(--codex)}
       <div class="tbar">
         <span class="grip">⠿</span>
         <span class="dot" style="background:var(--local)"></span>
-        <span class="wt" style="color:var(--local)">上手</span>
+        <span class="wt" style="color:var(--local)" data-i18n="i.wt">上手</span>
         <span class="badge">macOS 14+</span>
         <span class="sp"></span><span class="wc">− ⤢ ×</span>
       </div>
@@ -549,12 +562,12 @@ git clone https://github.com/\
   shinteni/relay-workbench.git
 cd relay-workbench
 
-<span class="c"># 构建打包 dist/Relay.app</span>
+<span class="c" data-i18n="i.c1"># 构建打包 dist/Relay.app</span>
 ./scripts/package-macos-app.sh
 
-<span class="c"># 安装，双击即用</span>
+<span class="c" data-i18n="i.c2"># 安装，双击即用</span>
 ditto dist/Relay.app ~/Applications/</pre>
-        <p class="note">SwiftUI GUI + Rust daemon · 简体中文 / 日本語 · 测试基线 Rust 113 + Swift 150</p>
+        <p class="note" data-i18n="i.note">SwiftUI GUI + Rust daemon · 简体中文 / 日本語 / English · 测试基线 Rust 113 + Swift 151</p>
       </div>
     </section>
   </div>
@@ -562,11 +575,11 @@ ditto dist/Relay.app ~/Applications/</pre>
 </main>
 
 <footer>
-  <span>🔒 仅限本机</span>
+  <span data-i18n="f.local">🔒 仅限本机</span>
   <span>·</span>
   <a href="https://github.com/shinteni/relay-workbench">github.com/shinteni/relay-workbench</a>
   <span class="sp"></span>
-  <span>上游参考 <a href="https://github.com/xai-org/grok-build">grok-build</a>（Apache-2.0）</span>
+  <span data-i18n="f.up">上游参考 <a href="https://github.com/xai-org/grok-build">grok-build</a>（Apache-2.0）</span>
   <span>·</span>
   <span>PROTOCOL v8</span>
 </footer>
@@ -575,7 +588,168 @@ ditto dist/Relay.app ~/Applications/</pre>
 (function(){
   var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* 焦点电路：滚动到窗即点亮接线 */
+  /* ── 三语文案：中文即页面标记本身，切换时从快照还原 ── */
+  var I18N = {
+    en: {
+      "h1": "Every AI CLI is strong alone.<br><span class=\"quiet\">Relayed together, they're a workbench.</span>",
+      "sub": "Relay embeds the <strong>real terminals</strong> of Claude Code, Codex, Grok and Ollama side by side on one canvas — they answer in parallel, relay in sequence, hold roundtables and judge each other. Everything stays on your Mac, and <span class=\"ret\">return</span> is always yours to press.",
+      "cta1": "Source on GitHub",
+      "cta2": "Build locally ↓",
+      "demo.wt": "CHAIN", "demo.replay": "↺ Replay",
+      "demo.judge": "⚡ JUDGE", "demo.judge2": "⚡ JUDGE",
+      "demo.tag2": "step 2 · received step 1", "demo.tag3": "daemon judge",
+      "t.wt": "TERMINAL", "t.badge": "⧉ your project",
+      "t.h2": "Real TUIs embedded — not an imitation",
+      "t.p": "Click a chip in the sidebar and that CLI's <strong>native terminal</strong> appears on the canvas: drag it, resize on eight axes, snap to half screen at the edges and quarters at the corners, tile everything with one click. <strong>PAIR</strong> opens Claude + Codex for the current project at once.",
+      "t.f1": "<strong>Output radar</strong> — the moment a terminal produces output its title bar lights up; Relay watches the byte stream only, never parses or stores it",
+      "t.f2": "<strong>Review queue</strong> — background output leaves a marker; ⌥⌘J walks you through oldest-first, ⌥⌘K takes you straight back",
+      "t.f3": "<strong>Desk memory</strong> — after a restart you get a thumbnail first; restore or forget is your call, and no CLI ever starts on its own",
+      "d.wt": "DIALOGUE", "d.badge": "roundtable · 4 seats",
+      "d.h2": "Put them at a roundtable",
+      "d.p": "Pick 2–4 agents and a topic; Relay drives the conversation seat by seat. Each keeps its own session memory, and every speaker receives a signed digest of what the others said. Cut in as the <strong>moderator</strong> anytime, and export the minutes as Markdown when the meeting ends.",
+      "d.s1": "· for", "d.s2": "· against", "d.s3": "· reviewer",
+      "d.s4": "You <small>· moderator</small>",
+      "c.wt": "COMPARE", "c.badge": "worktree isolation",
+      "c.h2": "Same task, separate copies, adopt the best",
+      "c.p": "One prompt goes to several agents in parallel. With worktree isolation each works in its own copy of the repo, and the changes roll up into a <strong>file × hunk</strong> board — merge exactly the hunks you want instead of swallowing a whole version.",
+      "c.v1": "CLAUDE'S VERSION", "c.v2": "CODEX'S VERSION",
+      "c.pick1": "✓ Adopt this hunk", "c.pick2": "✓ Adopt this hunk",
+      "j.wt": "VERDICT", "j.badge": "evidence chain",
+      "j.h2": "Deadlocked? Bring in a judge — and keep the evidence",
+      "j.p": "<strong>Freeze</strong> several terminal screens into comparison cards and hand them to another CLI or a daemon judge: verdict, reasoning and confidence come back structured. Sealing stores a private checkpoint with the <strong>git baseline</strong> of the moment, so you can check for code drift and compare derived branches later. Every step is explicit — Relay never presses return for you, never rewrites records, never grades results on its own.",
+      "j.d1": "Freeze<small>read-only snapshot</small>",
+      "j.d2": "Judge<small>you press return</small>",
+      "j.d3": "Seal<small>explicit click</small>",
+      "j.d4": "Checkpoint<small>git baseline</small>",
+      "j.d5": "Lineage / drift<small>across generations</small>",
+      "g.wt": "APPROVALS",
+      "g.h2": "The gate and the return key are both yours",
+      "g.p": "Tool approvals from every task funnel into one approvals window, and each flow resumes once you decide. Writes into terminals always use bracketed paste — <strong>fill only, never run</strong>. Relay itself has no account, no telemetry, no cloud.",
+      "g.k1": "Terminal PTY", "g.v1": "content is never recorded — Relay only watches whether output is flowing",
+      "g.k2": "Screen snapshots", "g.v2": "live in process memory only — no clipboard, no disk",
+      "g.k3": "Checkpoints", "g.v3": "written only on explicit save: dirs 0700 · files 0600 · deletion goes to Trash",
+      "g.k4": "Network", "g.v4": "Relay itself talks to no remote — LOCAL ONLY",
+      "a.wt": "ADAPTERS", "a.badge": "zero-code manifest",
+      "a.c1": "// line-based CLIs use generic; ACP speakers use acp",
+      "a.note": "One JSON file connects any CLI; declare session arguments and chats become resumable.",
+      "i.wt": "GET STARTED",
+      "i.c1": "# build &amp; package dist/Relay.app",
+      "i.c2": "# install, then double-click",
+      "i.note": "SwiftUI GUI + Rust daemon · 简体中文 / 日本語 / English · test baseline: Rust 113 + Swift 151",
+      "f.local": "🔒 LOCAL ONLY",
+      "f.up": "upstream reference <a href=\"https://github.com/xai-org/grok-build\">grok-build</a> (Apache-2.0)"
+    },
+    ja: {
+      "h1": "どの AI CLI も、単体で強い。<br><span class=\"quiet\">つないで初めて、ワークベンチになる。</span>",
+      "sub": "Relay は Claude Code・Codex・Grok・Ollama の<strong>本物のターミナル</strong>を 1 枚のキャンバスに並べて埋め込みます。同時に答えさせ、順番にリレーさせ、円卓で議論させ、互いに判定させる——すべてあなたの Mac の中だけで動き、<span class=\"ret\">return</span> を押すのはいつもあなたです。",
+      "cta1": "GitHub で見る",
+      "cta2": "ローカルでビルド ↓",
+      "demo.wt": "チェーン", "demo.replay": "↺ もう一度",
+      "demo.judge": "⚡ 判定", "demo.judge2": "⚡ 判定",
+      "demo.tag2": "step 2 · 前段を受信", "demo.tag3": "daemon 判定役",
+      "t.wt": "ターミナル", "t.badge": "⧉ あなたのプロジェクト",
+      "t.h2": "埋め込むのは本物の TUI。もどきではない",
+      "t.p": "サイドバーのチップをクリックすると、その CLI の<strong>ネイティブターミナル</strong>がキャンバスに現れます。ドラッグ、8 方向リサイズ、端で半画面・角で 1/4 画面スナップ、ワンクリックで整列。<strong>ペア</strong>なら現在のプロジェクトの Claude + Codex を一度に開けます。",
+      "t.f1": "<strong>出力レーダー</strong>——どの端末が出力中かはタイトルバーの波形ですぐ分かる。Relay はバイト列を見るだけで、解析も保存もしない",
+      "t.f2": "<strong>未読キュー</strong>——バックグラウンドの出力はマークとして残る。⌥⌘J で古い順に巡回、⌥⌘K で元の場所へ",
+      "t.f3": "<strong>デスクメモリ</strong>——再起動後はまずサムネイル。復元するか忘れるかはあなたが決める。CLI が勝手に起動することはない",
+      "d.wt": "対話", "d.badge": "円卓 · 4 席",
+      "d.h2": "円卓会議をさせよう",
+      "d.p": "エージェントを 2〜4 体と議題を選ぶと、Relay が席順に会話を回します。各自が独立したセッション記憶を持ち、発言前には他の発言の署名付きサマリーを受け取ります。いつでも<strong>司会</strong>として割り込め、散会後は議事録を Markdown で書き出せます。",
+      "d.s1": "· 賛成", "d.s2": "· 反対", "d.s3": "· レビュアー",
+      "d.s4": "あなた <small>· 司会</small>",
+      "c.wt": "比較", "c.badge": "worktree 分離",
+      "c.h2": "同じ課題を別々に解かせ、良い方を採る",
+      "c.p": "1 つのプロンプトを複数のエージェントに並列で送ります。worktree 分離では各自がリポジトリの独立コピーで作業し、変更は<strong>ファイル × ハンク</strong>のボードに集約。バージョンを丸ごとではなく、欲しいハンクだけを選んで取り込めます。",
+      "c.v1": "CLAUDE の版", "c.v2": "CODEX の版",
+      "c.pick1": "✓ このハンクを採用", "c.pick2": "✓ このハンクを採用",
+      "j.wt": "判定", "j.badge": "証拠チェーン",
+      "j.h2": "決着がつかないなら判定役へ。証拠は残る",
+      "j.p": "複数の端末画面を<strong>フリーズ</strong>して対照カードにし、別の CLI か daemon の判定役に渡します。結論・理由・確度が構造化されて返り、封印時には <strong>git ベースライン</strong>ごとプライベートチェックポイントとして保存。あとからコードのドリフト検査も派生ブランチの比較もできます。どのステップも明示的——Relay が代わりに return を押すことも、記録を書き換えることも、勝手に採点することもありません。",
+      "j.d1": "フリーズ<small>読み取り専用</small>",
+      "j.d2": "判定<small>return は人が押す</small>",
+      "j.d3": "封印<small>明示クリック</small>",
+      "j.d4": "チェックポイント<small>git ベースライン</small>",
+      "j.d5": "系譜 / ドリフト<small>世代間比較</small>",
+      "g.wt": "承認",
+      "g.h2": "ゲートも return も、あなたの手の中",
+      "g.p": "全タスクのツール承認は 1 つの承認ウィンドウに集約され、処理すれば各フローが再開します。端末への書き込みは常に bracketed paste——<strong>入力するだけで、実行はしない</strong>。Relay 自体にアカウントもテレメトリもクラウドもありません。",
+      "g.k1": "端末 PTY", "g.v1": "内容は記録しない。出力の有無だけを見る",
+      "g.k2": "画面スナップ", "g.v2": "プロセスメモリのみ。クリップボードにもディスクにも残らない",
+      "g.k3": "チェックポイント", "g.v3": "明示保存時のみ書き込み：ディレクトリ 0700 · ファイル 0600 · 削除はゴミ箱へ",
+      "g.k4": "ネットワーク", "g.v4": "Relay 自体はリモート通信ゼロ——LOCAL ONLY",
+      "a.wt": "接続", "a.badge": "ノーコード manifest",
+      "a.c1": "// 行出力の CLI は generic、ACP 対応は acp",
+      "a.note": "JSON 1 枚で任意の CLI を接続。セッション引数を宣言すれば続きから話せます。",
+      "i.wt": "はじめる",
+      "i.c1": "# dist/Relay.app をビルド",
+      "i.c2": "# インストールして起動",
+      "i.note": "SwiftUI GUI + Rust daemon · 简体中文 / 日本語 / English · テスト基線：Rust 113 + Swift 151",
+      "f.local": "🔒 ローカルのみ",
+      "f.up": "上流参照 <a href=\"https://github.com/xai-org/grok-build\">grok-build</a>（Apache-2.0）"
+    }
+  };
+  var DEMO_TEXT = {
+    zh: {
+      prompt: '用一句话解释幂等性；下一步请对上一步挑一个反例。',
+      out1: '<span class="hl">同一操作执行一次和执行多次，\n结果完全相同。</span>\n\n<span class="vg">✓ step 1 完成 · 结果交给下一步</span>',
+      out2: '<span class="hl">反例：HTTP POST 通常不幂等——\n重复提交会创建重复订单。</span>\n\n<span class="vg">✓ step 2 完成 · 送入裁决</span>',
+      out3: '<span class="vw">结论</span>  <span class="hl">两步互补，均成立</span>\n<span class="vw">理由</span>  定义正确，反例边界清晰\n<span class="vw">把握</span>  <span class="vg">高</span>',
+      foot: '<span class="ok">✓ 链完成</span> · 2 步 + 裁决 · 会话各自保持 · 可 ⑂ 分叉续跑'
+    },
+    en: {
+      prompt: 'Explain idempotency in one sentence; next step, give one counterexample.',
+      out1: '<span class="hl">Running the same operation once or\nmany times gives the same result.</span>\n\n<span class="vg">✓ step 1 done · handed to next step</span>',
+      out2: '<span class="hl">Counterexample: HTTP POST is usually\nnot idempotent — resubmitting\ncreates duplicate orders.</span>\n\n<span class="vg">✓ step 2 done · sent to judge</span>',
+      out3: '<span class="vw">Verdict</span>  <span class="hl">Both hold; complementary</span>\n<span class="vw">Reason</span>  Correct definition, clear edge\n<span class="vw">Confidence</span>  <span class="vg">High</span>',
+      foot: '<span class="ok">✓ chain complete</span> · 2 steps + verdict · sessions kept · fork anytime with ⑂'
+    },
+    ja: {
+      prompt: '冪等性を一文で説明して。次のステップは、それに反例を一つ挙げて。',
+      out1: '<span class="hl">同じ操作を 1 回でも複数回でも、\n結果は変わらないこと。</span>\n\n<span class="vg">✓ step 1 完了 · 次のステップへ</span>',
+      out2: '<span class="hl">反例：HTTP POST は通常、冪等では\nない——再送信すると注文が重複する。</span>\n\n<span class="vg">✓ step 2 完了 · 判定へ</span>',
+      out3: '<span class="vw">結論</span>  <span class="hl">両者は補完的で、いずれも妥当</span>\n<span class="vw">理由</span>  定義は正確、境界も明確\n<span class="vw">確度</span>  <span class="vg">高</span>',
+      foot: '<span class="ok">✓ チェーン完了</span> · 2 ステップ + 判定 · セッション各自保持 · ⑂ でフォーク可'
+    }
+  };
+
+  /* 中文快照：切回 zh 时原样还原 */
+  var nodes = [].slice.call(document.querySelectorAll('[data-i18n]'));
+  var zhSnapshot = {};
+  nodes.forEach(function(n){ zhSnapshot[n.getAttribute('data-i18n')] = n.innerHTML; });
+
+  var lang = 'zh';
+  function detectLang(){
+    try {
+      var saved = localStorage.getItem('lp-lang');
+      if (saved && (saved === 'zh' || I18N[saved])) return saved;
+    } catch (e) {}
+    var nav = (navigator.language || 'en').toLowerCase();
+    if (nav.indexOf('zh') === 0) return 'zh';
+    if (nav.indexOf('ja') === 0) return 'ja';
+    return 'en';
+  }
+  function setLang(next){
+    lang = next;
+    try { localStorage.setItem('lp-lang', next); } catch (e) {}
+    document.documentElement.lang =
+      next === 'zh' ? 'zh-CN' : next === 'ja' ? 'ja' : 'en';
+    nodes.forEach(function(n){
+      var key = n.getAttribute('data-i18n');
+      n.innerHTML = next === 'zh'
+        ? zhSnapshot[key]
+        : (I18N[next][key] || zhSnapshot[key]);
+    });
+    [].slice.call(document.querySelectorAll('.langs button')).forEach(function(b){
+      b.classList.toggle('on', b.getAttribute('data-lang') === next);
+    });
+    if (started) { stopTimers(); finalState(); }
+  }
+  [].slice.call(document.querySelectorAll('.langs button')).forEach(function(b){
+    b.addEventListener('click', function(){ setLang(b.getAttribute('data-lang')); });
+  });
+
+  /* ── 焦点电路：滚动到窗即点亮接线 ── */
   var wires = [].slice.call(document.querySelectorAll('.wire'));
   if (!('IntersectionObserver' in window) || reduce) {
     wires.forEach(function(w){ w.classList.add('lit'); });
@@ -588,24 +762,23 @@ ditto dist/Relay.app ~/Applications/</pre>
     wires.forEach(function(w){ io.observe(w); });
   }
 
-  /* 串联演示：一条链跑一遍，可重放 */
-  var PROMPT = '用一句话解释幂等性；下一步请对上一步挑一个反例。';
-  var OUT1 = '<span class="hl">同一操作执行一次和执行多次，\n结果完全相同。</span>\n\n<span class="vg">✓ step 1 完成 · 结果交给下一步</span>';
-  var OUT2 = '<span class="hl">反例：HTTP POST 通常不幂等——\n重复提交会创建重复订单。</span>\n\n<span class="vg">✓ step 2 完成 · 送入裁决</span>';
-  var OUT3 = '<span class="vw">结论</span>  <span class="hl">两步互补，均成立</span>\n<span class="vw">理由</span>  定义正确，反例边界清晰\n<span class="vw">把握</span>  <span class="vg">高</span>';
-  var FOOT = '<span class="ok">✓ 链完成</span> · 2 步 + 裁决 · 会话各自保持 · 可 ⑂ 分叉续跑';
-
+  /* ── 串联演示：一条链跑一遍，可重放，随语言切换 ── */
   var q = function(id){ return document.getElementById(id); };
   var timers = [];
+  var started = false;
   function later(fn, t){ timers.push(setTimeout(fn, t)); }
+  function stopTimers(){
+    timers.forEach(clearTimeout); timers.forEach(clearInterval); timers = [];
+  }
 
   function finalState(){
-    q('ptext').textContent = PROMPT;
+    var d = DEMO_TEXT[lang];
+    q('ptext').textContent = d.prompt;
     q('pcaret').classList.remove('on');
     ['st1','st2','st3'].forEach(function(s){ q(s).classList.add('on'); });
     ['pane1','pane2','pane3'].forEach(function(p){ q(p).classList.add('on'); });
-    q('out1').innerHTML = OUT1; q('out2').innerHTML = OUT2; q('out3').innerHTML = OUT3;
-    q('dfoot').innerHTML = FOOT;
+    q('out1').innerHTML = d.out1; q('out2').innerHTML = d.out2; q('out3').innerHTML = d.out3;
+    q('dfoot').innerHTML = d.foot;
   }
 
   function typeInto(el, text, cps, done){
@@ -619,39 +792,43 @@ ditto dist/Relay.app ~/Applications/</pre>
   }
 
   function run(){
-    timers.forEach(clearTimeout); timers.forEach(clearInterval); timers = [];
+    stopTimers();
+    started = true;
     if (reduce) { finalState(); return; }
+    var d = DEMO_TEXT[lang];
     q('ptext').textContent = ''; q('dfoot').innerHTML = '';
     ['st1','st2','st3'].forEach(function(s){ q(s).classList.remove('on'); });
     ['pane1','pane2','pane3'].forEach(function(p){ q(p).classList.remove('on'); });
     ['out1','out2','out3'].forEach(function(o){ q(o).innerHTML = ''; });
     q('pcaret').classList.add('on');
-    typeInto(q('ptext'), PROMPT, 34, function(){
+    typeInto(q('ptext'), d.prompt, 34, function(){
       later(function(){
         q('pcaret').classList.remove('on');
         q('st1').classList.add('on'); q('pane1').classList.add('on');
-        q('out1').innerHTML = OUT1;
+        q('out1').innerHTML = d.out1;
         later(function(){
           q('st2').classList.add('on'); q('pane2').classList.add('on');
-          q('out2').innerHTML = OUT2;
+          q('out2').innerHTML = d.out2;
           later(function(){
             q('st3').classList.add('on'); q('pane3').classList.add('on');
-            q('out3').innerHTML = OUT3;
-            q('dfoot').innerHTML = FOOT;
+            q('out3').innerHTML = d.out3;
+            q('dfoot').innerHTML = d.foot;
           }, 1000);
         }, 1100);
       }, 420);
     });
   }
 
+  setLang(detectLang());
+
   var demo = document.getElementById('demo');
-  var started = false;
   if (reduce || !('IntersectionObserver' in window)) {
+    started = true;
     finalState();
   } else {
     var dio = new IntersectionObserver(function(es){
       es.forEach(function(e){
-        if (e.isIntersecting && !started) { started = true; run(); dio.disconnect(); }
+        if (e.isIntersecting && !started) { run(); dio.disconnect(); }
       });
     }, { threshold: 0.35 });
     dio.observe(demo);

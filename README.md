@@ -7,9 +7,11 @@
 把 Claude Code、Codex、Grok、Ollama 等真实 CLI 的 TUI 并排嵌进一块自由画布，<br>
 让它们同时发送、顺序接力、圆桌对话、互相裁决——全部只发生在你的 Mac 上。
 
+**简体中文** · **[English](README.en.md)** · **[日本語](README.ja.md)**
+
 **[产品主页 Landing Page ↗](https://shinteni.github.io/relay-workbench/)**
 
-简体中文 / 日本語界面 · SwiftUI GUI + Rust daemon · 测试基线 Rust 113 项 + Swift 150 项
+简体中文 / 日本語 / English 界面 · SwiftUI GUI + Rust daemon · 测试基线 Rust 113 项 + Swift 151 项
 
 </div>
 
