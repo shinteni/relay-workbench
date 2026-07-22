@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay 串联器 — 本地多 CLI 智能体工作台</title>
+<meta name="description" content="面向 macOS 的本地多 CLI 智能体工作台：Claude Code、Codex、Grok、Ollama 的真实 TUI 并排嵌入，同时发送、顺序接力、圆桌对话、结果裁决与私有决策链——全部只发生在你的 Mac 上。">
+<meta property="og:title" content="Relay 串联器 — 本地多 CLI 智能体工作台">
+<meta property="og:description" content="把你手里的 AI CLI 串联成一台工作台。真实 TUI 并排嵌入，同发对比 / 顺序接力 / 圆桌对话 / 结果裁决，全部本地。">
+<meta property="og:type" content="website">
+<style>
+:root{
+  --ink:#0D0D0E; --panel:#151516; --raised:#1D1D1E;
+  --line:rgba(255,255,255,.07); --text:#EBEBED; --muted:#9999A1;
+  --signal:#59A6FF; --success:#70D69C; --warning:#F2B84A;
+  --danger:#FF6B7D; --claude:#E38557; --mix:#B885FF;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Noto Sans CJK SC",system-ui,sans-serif;
+  --trace-w:56px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  background:var(--ink); color:var(--text);
+  font-family:var(--sans); font-size:16px; line-height:1.75;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:rgba(89,166,255,.28)}
+a{color:var(--signal); text-decoration:none}
+a:hover{text-decoration:underline}
+a:focus-visible,button:focus-visible{outline:2px solid var(--signal); outline-offset:3px; border-radius:4px}
+.mono{font-family:var(--mono)}
+
+/* ── 顶栏 ─────────────────────────────── */
+.nav{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; gap:14px;
+  padding:14px 28px;
+  background:rgba(13,13,14,.72);
+  -webkit-backdrop-filter:blur(18px) saturate(160%);
+  backdrop-filter:blur(18px) saturate(160%);
+  border-bottom:1px solid var(--line);
+}
+.nav .brand{font-family:var(--mono); font-weight:700; font-size:15px; letter-spacing:-.02em; color:var(--text)}
+.nav .brand .gt{color:var(--signal); margin-right:8px}
+.nav .spacer{flex:1}
+.nav .gh{
+  font-family:var(--mono); font-size:12px; font-weight:700; letter-spacing:.04em;
+  color:var(--signal); border:1px solid rgba(89,166,255,.35);
+  padding:7px 14px; border-radius:7px; background:rgba(89,166,255,.08);
+  transition:background .15s ease;
+}
+.nav .gh:hover{background:rgba(89,166,255,.16); text-decoration:none}
+
+/* ── 页面级串联走线 ───────────────────── */
+.page{position:relative; max-width:1060px; margin:0 auto; padding:0 28px}
+.trace{
+  position:absolute; top:0; bottom:0; left:calc(28px + 7px); width:1.5px;
+  background:linear-gradient(to bottom, transparent 0, rgba(89,166,255,.26) 60px, rgba(89,166,255,.26) calc(100% - 120px), transparent 100%);
+}
+.sec{position:relative; padding:88px 0 88px var(--trace-w)}
+.sec .node{
+  position:absolute; left:0; top:100px;
+  width:15px; height:15px; border-radius:50%;
+  border:1.5px solid rgba(89,166,255,.4); background:var(--ink);
+  transition:border-color .4s ease, box-shadow .4s ease;
+}
+.sec .node::after{
+  content:""; position:absolute; inset:4px; border-radius:50%;
+  background:rgba(89,166,255,.35); transition:background .4s ease;
+}
+.sec.lit .node{border-color:var(--signal); box-shadow:0 0 14px rgba(89,166,255,.45)}
+.sec.lit .node::after{background:var(--signal)}
+.kicker{
+  font-family:var(--mono); font-size:12px; font-weight:700;
+  letter-spacing:.22em; color:var(--muted); margin-bottom:14px;
+}
+.kicker b{color:var(--signal); font-weight:700}
+h2{font-size:30px; line-height:1.35; letter-spacing:-.01em; margin-bottom:18px; font-weight:700}
+.sec p.lead{color:var(--muted); max-width:660px}
+.sec p.lead strong{color:var(--text); font-weight:600}
+
+/* ── HERO ─────────────────────────────── */
+.hero{position:relative; padding:96px 0 72px var(--trace-w)}
+.hero .node{
+  position:absolute; left:-3px; top:108px;
+  font-family:var(--mono); font-weight:700; font-size:20px; color:var(--signal);
+  background:var(--ink); padding:6px 0;
+}
+h1{font-size:clamp(30px,5vw,46px); line-height:1.28; letter-spacing:-.015em; font-weight:800; max-width:760px}
+h1 .em{color:var(--signal)}
+.hero .sub{margin-top:22px; font-size:17px; color:var(--muted); max-width:640px}
+.hero .sub strong{color:var(--text); font-weight:600}
+.hero .agents-line{
+  margin-top:18px; font-family:var(--mono); font-size:13px; color:var(--muted);
+  display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center;
+}
+.hero .agents-line .a{display:inline-flex; align-items:center; gap:7px}
+.hero .agents-line .dot{width:8px; height:8px; border-radius:3px}
+.cta{margin-top:34px; display:flex; gap:14px; flex-wrap:wrap}
+.btn{
+  font-family:var(--mono); font-weight:700; font-size:14px; letter-spacing:.03em;
+  padding:12px 22px; border-radius:8px; display:inline-block;
+}
+.btn.primary{background:var(--signal); color:#0A1624}
+.btn.primary:hover{background:#77B6FF; text-decoration:none}
+.btn.ghost{color:var(--text); border:1px solid var(--line); background:var(--raised)}
+.btn.ghost:hover{border-color:rgba(255,255,255,.2); text-decoration:none}
+
+/* ── 应用 mockup ──────────────────────── */
+.shot{margin:64px 0 0 var(--trace-w)}
+.frame{
+  background:#111112; border:1px solid rgba(255,255,255,.09);
+  border-top-color:rgba(255,255,255,.16);
+  border-radius:13px; overflow:hidden;
+  box-shadow:0 30px 80px rgba(0,0,0,.55);
+  font-family:var(--mono);
+}
+.frame .titlebar{display:flex; gap:7px; padding:12px 14px; border-bottom:1px solid var(--line)}
+.frame .titlebar i{width:11px; height:11px; border-radius:50%; background:#3A3A3C}
+.frame .titlebar i:nth-child(1){background:#FF5F57}
+.frame .titlebar i:nth-child(2){background:#FEBC2E}
+.frame .titlebar i:nth-child(3){background:#28C840}
+.app{display:flex; min-height:430px}
+.sb{
+  width:236px; flex:none; background:var(--panel);
+  border-right:1px solid var(--line); padding:16px 12px 12px;
+  display:flex; flex-direction:column; font-size:10px;
+}
+.sb .logo{font-size:13.5px; font-weight:700; color:var(--text); padding-left:4px}
+.sb .logo .gt{color:var(--signal)}
+.sb .stem{width:1.5px; height:12px; background:rgba(89,166,255,.3); margin:3px 0 0 9px}
+.pcard{
+  border:1px solid rgba(89,166,255,.22); background:rgba(89,166,255,.06);
+  border-radius:8px; padding:8px 9px; display:flex; align-items:center; gap:8px;
+}
+.pcard .ring{
+  width:11px; height:11px; border-radius:50%; flex:none;
+  border:1.5px solid rgba(89,166,255,.45); position:relative;
+}
+.pcard .ring::after{content:""; position:absolute; inset:2.5px; border-radius:50%; background:var(--signal)}
+.pcard .pn{font-weight:700; font-size:12px; color:var(--text)}
+.pcard .pp{color:var(--muted); font-size:8.5px; margin-top:1px}
+.pcard .ud{margin-left:auto; color:var(--signal); font-size:9px}
+.sb .slabel{color:var(--muted); letter-spacing:.16em; font-size:8.5px; font-weight:700; margin:12px 4px 6px}
+.sb .folder{display:flex; align-items:center; gap:7px; padding:4px 4px; color:var(--text); font-size:10.5px}
+.sb .folder .ic{color:var(--signal)}
+.sb .folder .path{color:var(--muted); font-size:8.5px}
+.sb .sess{color:var(--muted); padding:3px 4px 3px 22px; font-size:9.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+.sb .grow{flex:1}
+.chips{display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; margin-top:8px}
+.chip{
+  display:flex; align-items:center; gap:5px; padding:4px 5px;
+  background:rgba(255,255,255,.03); border:1px solid var(--line); border-radius:6px;
+  font-size:8.5px; font-weight:600; color:var(--text);
+}
+.chip .tile{
+  width:14px; height:14px; border-radius:4px; flex:none;
+  display:flex; align-items:center; justify-content:center;
+  font-size:5.5px; font-weight:700;
+}
+.chip.pair{border-color:rgba(89,166,255,.3); background:rgba(89,166,255,.07); color:var(--signal)}
+.linkrow{display:flex; gap:4px; margin-top:6px}
+.linkrow span{
+  flex:1; text-align:center; padding:4px 0; border-radius:6px;
+  border:1px solid var(--line); background:rgba(255,255,255,.02);
+  color:var(--muted); font-size:8.5px; font-weight:700;
+}
+.sb .foot{display:flex; justify-content:space-between; color:var(--muted); font-size:7.5px; margin-top:10px; padding:0 3px}
+.canvas{flex:1; background:#0B0B0C; padding:14px; display:flex; gap:12px; min-width:0}
+.tui{
+  flex:1; min-width:0; background:#101011; border:1px solid var(--line);
+  border-radius:9px; overflow:hidden; display:flex; flex-direction:column;
+}
+.tui .tbar{
+  display:flex; align-items:center; gap:7px; padding:7px 10px;
+  border-bottom:1px solid var(--line); font-size:9px; font-weight:700;
+}
+.tui .tbar .d{width:7px; height:7px; border-radius:50%}
+.tui .tbar .proj{margin-left:auto; font-size:7.5px; padding:2px 6px; border-radius:4px; border:1px solid var(--line); color:var(--muted); font-weight:600}
+.tui pre{
+  padding:12px 13px; font-size:9.5px; line-height:1.9; color:var(--muted);
+  font-family:var(--mono); overflow:hidden; flex:1; white-space:pre-wrap;
+}
+.tui pre .p{color:var(--signal)}
+.tui pre .ok{color:var(--success)}
+.tui pre .hl{color:var(--text)}
+.tui pre .cur{
+  display:inline-block; width:7px; height:12px; vertical-align:-2px; background:var(--text);
+  animation:blink 1.1s steps(2,start) infinite;
+}
+@keyframes blink{to{visibility:hidden}}
+@media (prefers-reduced-motion:reduce){.tui pre .cur{animation:none}}
+.shot .cap{margin-top:14px; text-align:center; color:var(--muted); font-size:12.5px; font-family:var(--mono)}
+
+/* ── 卡片网格 ─────────────────────────── */
+.cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; margin-top:34px}
+.card{
+  background:var(--panel); border:1px solid var(--line); border-radius:11px;
+  padding:22px 20px 20px;
+}
+.card .glyph{
+  font-family:var(--mono); font-size:19px; font-weight:700; margin-bottom:12px; display:block;
+}
+.card h3{font-size:16.5px; margin-bottom:8px; font-weight:700}
+.card p{font-size:13.5px; color:var(--muted); line-height:1.8}
+
+/* ── 决策链 ───────────────────────────── */
+.chain{
+  margin-top:36px; font-family:var(--mono); font-size:13px;
+  display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+}
+.chain .step{
+  border:1px solid var(--line); background:var(--panel);
+  padding:9px 14px; border-radius:8px; color:var(--text); white-space:nowrap;
+}
+.chain .step small{display:block; color:var(--muted); font-size:10px; margin-top:2px; letter-spacing:.06em}
+.chain .arr{color:var(--signal); font-weight:700}
+.factlist{margin-top:26px; display:grid; gap:9px; max-width:680px}
+.factlist li{
+  list-style:none; color:var(--muted); font-size:14px;
+  padding-left:24px; position:relative;
+}
+.factlist li::before{
+  content:"›"; position:absolute; left:2px; color:var(--signal);
+  font-family:var(--mono); font-weight:700;
+}
+.factlist li strong{color:var(--text); font-weight:600}
+
+/* ── 隐私区 ───────────────────────────── */
+.local{
+  margin-top:34px; border:1px solid rgba(112,214,156,.25); border-radius:12px;
+  background:rgba(112,214,156,.05); padding:26px 26px 22px; max-width:760px;
+}
+.local .badge{
+  font-family:var(--mono); font-weight:700; font-size:12px; letter-spacing:.2em;
+  color:var(--success); display:flex; align-items:center; gap:9px; margin-bottom:12px;
+}
+.local .badge::before{content:"🔒"; font-size:13px}
+.local p{color:var(--muted); font-size:14.5px}
+.local p strong{color:var(--text)}
+
+/* ── 代码块 ───────────────────────────── */
+pre.code{
+  margin-top:30px; background:#101011; border:1px solid var(--line);
+  border-radius:11px; padding:20px 22px; overflow-x:auto;
+  font-family:var(--mono); font-size:13px; line-height:2; color:var(--text);
+}
+pre.code .c{color:var(--muted)}
+pre.code .k{color:var(--signal)}
+pre.code .s{color:var(--success)}
+.req{margin-top:18px; font-size:13px; color:var(--muted); font-family:var(--mono)}
+
+/* ── 页脚 ─────────────────────────────── */
+footer{
+  margin-top:40px; border-top:1px solid var(--line);
+  padding:34px 28px 46px; text-align:center;
+  color:var(--muted); font-size:12.5px; font-family:var(--mono);
+}
+footer a{color:var(--muted); text-decoration:underline}
+footer a:hover{color:var(--signal)}
+
+@media (max-width:760px){
+  .trace,.sec .node,.hero .node{display:none}
+  .sec,.hero{padding-left:0}
+  .shot{margin-left:0}
+  .app{flex-direction:column}
+  .sb{width:100%; border-right:none; border-bottom:1px solid var(--line)}
+  .canvas{flex-direction:column}
+  h2{font-size:25px}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="brand"><span class="gt">&gt;</span>RELAY_ 串联器</span>
+  <span class="spacer"></span>
+  <a class="gh" href="https://github.com/shinteni-hikaso/relay-workbench">GitHub ↗</a>
+</nav>
+
+<div class="page">
+  <div class="trace" aria-hidden="true"></div>
+
+  <!-- HERO -->
+  <header class="hero">
+    <span class="node mono" aria-hidden="true">&gt;</span>
+    <h1>把你手里的 AI CLI，<br><span class="em">串联</span>成一台工作台</h1>
+    <p class="sub">Relay 是面向 macOS 的<strong>本地多 CLI 智能体工作台</strong>：把 Claude Code、Codex、Grok、Ollama 的<strong>真实终端 TUI</strong> 并排嵌进一块自由画布，再让它们同时发送、顺序接力、圆桌对话、互相裁决。</p>
+    <div class="agents-line" aria-label="支持的 CLI">
+      <span class="a"><i class="dot" style="background:var(--claude)"></i>Claude Code</span>
+      <span class="a"><i class="dot" style="background:var(--signal)"></i>Codex</span>
+      <span class="a"><i class="dot" style="background:var(--mix)"></i>MIX 共识</span>
+      <span class="a"><i class="dot" style="background:var(--success)"></i>Grok</span>
+      <span class="a"><i class="dot" style="background:var(--success)"></i>Ollama</span>
+      <span class="a" style="color:var(--muted)">＋ 任意 CLI（零代码 manifest 接入）</span>
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/shinteni-hikaso/relay-workbench">在 GitHub 查看源码</a>
+      <a class="btn ghost" href="#build">本地构建 ↓</a>
+    </div>
+
+    <!-- 应用 mockup -->
+    <div class="shot" role="img" aria-label="Relay 工作台示意：左侧项目侧栏，右侧 Claude 与 Codex 两个真实终端并排平铺">
+      <div class="frame">
+        <div class="titlebar"><i></i><i></i><i></i></div>
+        <div class="app">
+          <div class="sb">
+            <div class="logo"><span class="gt">&gt; </span>RELAY_</div>
+            <div class="stem"></div>
+            <div class="pcard">
+              <span class="ring"></span>
+              <span><span class="pn">串联器</span><br><span class="pp">/Users/个人项目/串联器</span></span>
+              <span class="ud">⇅</span>
+            </div>
+            <div class="slabel">项目</div>
+            <div class="folder"><span class="ic">▣</span> 串联器 <span class="path">/Users/个人项目</span></div>
+            <div class="sess">分叉验证链</div>
+            <div class="sess">Ollama → 评审员 → Claude</div>
+            <div class="sess">两份评价中选出更有行动价值的一份…</div>
+            <div class="grow"></div>
+            <div class="slabel">智能体</div>
+            <div class="chips">
+              <span class="chip"><span class="tile" style="color:var(--claude);border:1px solid var(--claude);background:rgba(227,133,87,.12)">CL</span>Claude</span>
+              <span class="chip"><span class="tile" style="color:var(--signal);border:1px solid var(--signal);background:rgba(89,166,255,.12)">CO</span>Codex</span>
+              <span class="chip"><span class="tile" style="color:var(--mix);border:1px solid var(--mix);background:rgba(184,133,255,.12)">MI</span>MIX</span>
+              <span class="chip"><span class="tile" style="color:var(--success);border:1px solid var(--success);background:rgba(112,214,156,.12)">GR</span>Grok</span>
+              <span class="chip"><span class="tile" style="color:var(--success);border:1px solid var(--success);background:rgba(112,214,156,.12)">OL</span>Ollama</span>
+              <span class="chip pair"><span class="tile" style="color:var(--signal);border:1px solid var(--signal)">⧉</span>双开</span>
+            </div>
+            <div class="linkrow"><span>⇄ 对话</span><span>⋈ 对比</span><span>› 接力</span></div>
+            <div class="foot"><span>🔒 仅限本机</span><span>PROTOCOL v8</span></div>
+          </div>
+          <div class="canvas">
+            <div class="tui">
+              <div class="tbar"><span class="d" style="background:var(--claude)"></span><span style="color:var(--claude)">CLAUDE</span><span style="color:var(--muted)">· Claude Code</span><span class="proj">⧉ 串联器</span></div>
+              <pre><span class="p">›</span> 用一句话解释幂等性。
+
+<span class="hl">同一操作执行一次和执行多次，
+结果完全相同。</span>
+
+<span class="ok">✓ 已完成 · 会话保持</span></pre>
+            </div>
+            <div class="tui">
+              <div class="tbar"><span class="d" style="background:var(--signal)"></span><span style="color:var(--signal)">CODEX</span><span class="proj">⧉ 串联器</span></div>
+              <pre><span class="p">›</span> 对左侧结论给出一个反例场景
+
+<span class="hl">HTTP POST 通常不是幂等的：
+重复提交会创建重复订单…</span>
+
+<span class="p">›</span> <span class="cur"></span></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="cap">项目为主体的侧栏 · 真实 CLI TUI 并排平铺 · 一键双开 Claude + Codex</p>
+    </div>
+  </header>
+
+  <!-- 01 真实终端 -->
+  <section class="sec" id="terminals">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>01</b> · 真实终端</div>
+    <h2>嵌入的是真实 CLI，不是模拟器</h2>
+    <p class="lead">点一下侧栏芯片，对应 CLI 的<strong>原生 TUI</strong> 就作为独立窗口出现在画布上——拖动、八向缩放、贴边吸附半屏、推角四分屏、一键平铺。每个终端永久带着创建时的项目标识，跨项目窗口不会失去目录身份；<strong>双开</strong>一次打开当前项目的 Claude + Codex 并自动排好。</p>
+    <ul class="factlist">
+      <li><strong>CLI 输出雷达</strong>——哪个终端正在产生输出，标题栏和侧栏立即亮起波形；Relay 只观察字节流，不解析、不保存内容</li>
+      <li><strong>待看队列与行动路由</strong>——后台终端的新输出沉淀为待看标记，<span class="mono">⌥⌘J</span> 按最早顺序逐个带回，<span class="mono">⌥⌘K</span> 一步返回来源</li>
+      <li><strong>CLI 桌面记忆</strong>——重启后先显示上次布局的缩略图，由你决定恢复还是忘记，不会擅自启动任何 CLI</li>
+    </ul>
+  </section>
+
+  <!-- 02 串联方式 -->
+  <section class="sec" id="link">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>02</b> · 串联方式</div>
+    <h2>五种把智能体连起来的方法</h2>
+    <div class="cards">
+      <div class="card"><span class="glyph" style="color:var(--mix)">⇄</span><h3>圆桌对话</h3><p>2–4 个智能体按座次轮转交谈，各自保持独立会话记忆；你可以随时以主持人身份插话，或把各方立场导出成纪要。</p></div>
+      <div class="card"><span class="glyph" style="color:var(--signal)">⋈</span><h3>同时发送</h3><p>同一提示词并行交给多个智能体对照回答；worktree 隔离模式下各自改代码，按文件、按改动块选择性采纳。</p></div>
+      <div class="card"><span class="glyph" style="color:var(--warning)">›</span><h3>顺序接力</h3><p>2–4 个步骤在 daemon 中按序接力，上一步的答案交给下一步；关掉窗口串联继续跑，还能从任意一环分叉出新链。</p></div>
+      <div class="card"><span class="glyph" style="color:var(--warning)">⚡</span><h3>结果裁决</h3><p>把多个终端的画面冻结成对照卡片，交给另一个 CLI 或 daemon 裁判评判；结论、理由、把握程度结构化返回。</p></div>
+      <div class="card"><span class="glyph" style="color:var(--signal)">⑂</span><h3>上下文分叉</h3><p>截取任一终端的活动画面，带上你的继续指令填入其他 CLI——bracketed paste 只填入、不执行，回车永远在你手里。</p></div>
+    </div>
+  </section>
+
+  <!-- 03 决策链 -->
+  <section class="sec" id="decisions">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>03</b> · 决策链</div>
+    <h2>每个结论都带着完整证据</h2>
+    <p class="lead">从冻结现场到最终裁决，每一步都是<strong>显式操作、只读证据</strong>：Relay 不替你按回车，不偷偷改写记录，也不自动评价结果。保存的检查点带着当时的 git 基线，随时可以检查代码漂移、对比派生分支。</p>
+    <div class="chain" role="img" aria-label="决策链流程：冻结现场 → 结果裁决 → 封存结果 → 私有检查点 → 血缘与漂移">
+      <span class="step">冻结现场<small>只读快照</small></span><span class="arr">→</span>
+      <span class="step">结果裁决<small>人握回车</small></span><span class="arr">→</span>
+      <span class="step">封存结果<small>显式点击</small></span><span class="arr">→</span>
+      <span class="step">私有检查点<small>git 基线</small></span><span class="arr">→</span>
+      <span class="step">血缘 / 漂移<small>多代对比</small></span>
+    </div>
+  </section>
+
+  <!-- 04 隐私 -->
+  <section class="sec" id="local">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>04</b> · 隐私边界</div>
+    <h2>全部只发生在你的 Mac 上</h2>
+    <div class="local">
+      <div class="badge">LOCAL ONLY</div>
+      <p>Relay 自身<strong>没有任何远端服务</strong>：没有账号、没有遥测、没有云同步。终端画面快照只存在于当前进程内存，<strong>不进剪贴板、不写磁盘</strong>；嵌入式终端的 PTY 内容从不记录。只有你显式保存的决策检查点会落盘——目录 <span class="mono">0700</span>、文件 <span class="mono">0600</span>，删除时进废纸篓而不是直接销毁。</p>
+    </div>
+  </section>
+
+  <!-- 05 接入任意 CLI -->
+  <section class="sec" id="adapters">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>05</b> · 开放接入</div>
+    <h2>一份 manifest，接入任何 CLI</h2>
+    <p class="lead">按行输出的 CLI 走 <span class="mono">generic</span> 段，讲 ACP（Agent Client Protocol）的走 <span class="mono">acp</span> 段——<strong>零代码</strong>。声明会话参数即可获得续聊，应用内置导入校验和健康检查。</p>
+    <pre class="code"><span class="c">// adapters/manifests/examples/echo.json</span>
+{
+  <span class="k">"id"</span>: <span class="s">"echo"</span>,
+  <span class="k">"display_name"</span>: <span class="s">"Echo CLI"</span>,
+  <span class="k">"requirements"</span>: [{ <span class="k">"env"</span>: <span class="s">"ECHO_BIN"</span>, <span class="k">"candidates"</span>: [<span class="s">"echo"</span>] }],
+  <span class="k">"generic"</span>: {
+    <span class="k">"command"</span>: <span class="s">"ECHO_BIN"</span>,
+    <span class="k">"resume_arguments"</span>: [<span class="s">"--resume"</span>, <span class="s">"{session}"</span>]
+  }
+}</pre>
+  </section>
+
+  <!-- 06 上手 -->
+  <section class="sec" id="build">
+    <span class="node" aria-hidden="true"></span>
+    <div class="kicker"><b>06</b> · 上手</div>
+    <h2>两条命令构建安装</h2>
+    <pre class="code"><span class="c"># 依赖：macOS 14+ · Swift 5.9+ · Rust · Node.js</span>
+git clone https://github.com/shinteni-hikaso/relay-workbench.git
+cd relay-workbench
+./scripts/package-macos-app.sh        <span class="c"># 构建并打包 dist/Relay.app</span>
+ditto dist/Relay.app ~/Applications/  <span class="c"># 安装，双击即用</span></pre>
+    <p class="req">GUI：SwiftUI（简体中文 / 日本語） · daemon 与协议层：Rust · 测试基线：Rust 113 项 + Swift 150 项</p>
+  </section>
+</div>
+
+<footer>
+  <p>© 2026 Relay 串联器 · <a href="https://github.com/shinteni-hikaso/relay-workbench">GitHub</a> · 本地优先，绝不上传</p>
+  <p style="margin-top:8px">仓库内保留 <a href="https://github.com/xai-org/grok-build">xai-org/grok-build</a> 快照作为实现参考（Apache-2.0）</p>
+</footer>
+
+<script>
+(function(){
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var secs = document.querySelectorAll('.sec');
+  if (!('IntersectionObserver' in window) || reduce) {
+    secs.forEach(function(s){ s.classList.add('lit'); });
+    return;
+  }
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting) { e.target.classList.add('lit'); io.unobserve(e.target); }
+    });
+  }, { rootMargin: '0px 0px -30% 0px' });
+  secs.forEach(function(s){ io.observe(s); });
+})();
+</script>
+</body>
+</html>
