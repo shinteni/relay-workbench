@@ -2962,6 +2962,10 @@ struct RelayTerminalTests {
         #expect(opening.contains("9.11 和 9.9 谁大"))
         #expect(opening.contains("开场观点"))
         #expect(!opening.contains("最后一轮"))
+        #expect(opening.contains("可以使用工具"))
+        #expect(opening.contains("网络检索"))
+        #expect(opening.contains("仅限读取"))
+        #expect(!opening.contains("不要使用任何工具"))
 
         let relayed = RelayDialogueScript.roundtablePrompt(
             speakerHasSpoken: true, isFinalRound: true,

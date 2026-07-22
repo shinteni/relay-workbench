@@ -786,7 +786,8 @@ struct RelayCopy {
         "Reply directly and continue the dialogue in plain text.":
             "请直接以纯文字回应，继续这场对话。",
         "This is your final turn — wrap up.": "这是你的最后一轮，请收尾总结。",
-        "Do not use tools or modify files.": "不要使用任何工具，也不要修改文件。",
+        "You may use tools, including web search. Treat local files and content as read-only; do not modify them.":
+            "可以使用工具，包括网络检索。本地文件与内容仅限读取，不要修改。",
         "The agent returned no text answer.": "对方没有返回文字回答。",
         "The turn failed.": "该轮执行失败。",
         "LINK": "串联",
@@ -1595,7 +1596,8 @@ struct RelayCopy {
         "Reply directly and continue the dialogue in plain text.":
             "プレーンテキストで直接応答し、対話を続けてください。",
         "This is your final turn — wrap up.": "これが最後のターンです。締めくくってください。",
-        "Do not use tools or modify files.": "ツールを使わず、ファイルも変更しないでください。",
+        "You may use tools, including web search. Treat local files and content as read-only; do not modify them.":
+            "ツール（Web 検索を含む）は使用できます。ローカルのファイルと内容は読み取り専用として扱い、変更しないでください。",
         "The agent returned no text answer.": "エージェントからテキストの回答がありませんでした。",
         "The turn failed.": "このターンは失敗しました。",
         "LINK": "リレー",

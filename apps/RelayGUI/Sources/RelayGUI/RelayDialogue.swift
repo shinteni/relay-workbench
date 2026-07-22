@@ -48,7 +48,9 @@ enum RelayDialogueScript {
         if isFinalRound {
             lines.append(copy.text("This is your final turn — wrap up."))
         }
-        lines.append(copy.text("Do not use tools or modify files."))
+        lines.append(copy.text(
+            "You may use tools, including web search. Treat local files and content as read-only; do not modify them."
+        ))
         return lines.joined(separator: "\n")
     }
 }
